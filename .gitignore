@@ -3,3 +3,7 @@
 h5_collective
 foo
 sample.darshan.txt
+*.run
+*.darshan
+*.err
+*.out
