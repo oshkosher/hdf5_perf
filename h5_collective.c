@@ -12,14 +12,14 @@
 
 #define DATASETNAME "/mydata"
 #define PRINT_PARTITIONS 0
-#define USE_CREATE_SUBARRAY 0
+#define MIMIC_HDF5_DATATYPE 1
 #define SET_MPI_ATOMIC 0
 
 int rank, np;
 
 /* note: these are incompatible with Darshan. If these are enabled, run
    "module unload darshan" before compiling. */
-/* #include "wrapper_fns.c" */
+#include "wrapper_fns.c"
 
 typedef struct {
   int rows, cols;  /* global size */
@@ -332,35 +332,50 @@ void writeMPIIOFile(const char *filename, Params *p) {
 
   MPI_Datatype element_type = MPI_DOUBLE;
 
+#if MIMIC_HDF5_DATATYPE
+  /* define the full array on disk */
   MPI_Datatype double_bytes;
   MPI_Type_contiguous(sizeof(double), MPI_BYTE, &double_bytes);
   MPI_Type_commit(&double_bytes);
-
   element_type = double_bytes;
-  // element_type = MPI_DOUBLE;
-
-  /* define the full array on disk */
-#if USE_CREATE_SUBARRAY
-  int full_sizes[2] = {p->rows, p->cols};
-  int part_sizes[2] = {p->rows, p->col_count};
-  int part_starts[2] = {0, p->col_start};
-  MPI_Type_create_subarray(2, full_sizes, part_sizes, part_starts,
-                           MPI_ORDER_C, element_type, &file_type);
-#else
-  // vector count=1, blocklength=5, stride=1 of:
   MPI_Datatype type1_vec, type2_hindex, type3_resized;
   MPI_Type_vector(1, p->col_count, 1, element_type, &type1_vec);
   int hindex_len = 1;
   MPI_Aint hindex_offset = p->col_start * sizeof(double);
   MPI_Type_create_hindexed(1, &hindex_len, &hindex_offset, type1_vec, &type2_hindex);
+  MPI_Type_free(&type1_vec);
   MPI_Type_create_resized(type2_hindex, 0, sizeof(double) * p->cols, &type3_resized);
+  MPI_Type_free(&type2_hindex);
   MPI_Type_vector(1, p->rows, 1, type3_resized, &file_type);
-#endif
-  MPI_Type_commit(&file_type);
+  MPI_Type_free(&type3_resized);
+
+  /* define the subarray in memory */
+  MPI_Type_vector(1, p->rows * p->col_count, 1, element_type, &memory_type);
+
+#else
+  /* define the full array on disk */
+  int full_sizes[2] = {p->rows, p->cols};
+  int part_sizes[2] = {p->rows, p->col_count};
+  int part_starts[2] = {0, p->col_start};
+  MPI_Type_create_subarray(2, full_sizes, part_sizes, part_starts,
+                           MPI_ORDER_C, element_type, &file_type);
 
   /* define the subarray in memory */
   MPI_Type_contiguous(p->rows * p->col_count, element_type, &memory_type);
+
+#endif
+
+  MPI_Type_commit(&file_type);
   MPI_Type_commit(&memory_type);
+
+  /*
+  if (rank == 0) {
+    char *s = mpiTypeSignature(file_type, NULL);
+    printf("mpiTypeSignature(file_type) = \"%s\"\n", s);
+    free(s);
+  }
+  */
+
 
   /* open the file */
   remove(filename);

@@ -29,7 +29,7 @@ endif
 
 all: $(EXECS)
 
-h5_collective: h5_collective.c
+h5_collective: h5_collective.c wrapper_fns.c
 	$(MPICC) $< $(LIB) -o $@
 
 run: h5_collective
