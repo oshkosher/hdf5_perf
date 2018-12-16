@@ -13,6 +13,7 @@
 #define DATASETNAME "/mydata"
 #define PRINT_PARTITIONS 0
 #define USE_CREATE_SUBARRAY 0
+#define SET_MPI_ATOMIC 0
 
 int rank, np;
 
@@ -62,6 +63,7 @@ int main(int argc, char **argv) {
     double mb = sizeof(double) * p.rows * p.cols / (1024.0 * 1024);
     printf("Write %dx%d grid (%.1f MiB) with %d ranks.\n",
            p.rows, p.cols, mb, np);
+    /* printf("MPI_ATOMIC=%d\n", SET_MPI_ATOMIC); */
   }
 
   makeFilenames(base_filename, &filename_h5, &filename_mpiio);
@@ -251,6 +253,8 @@ void writeHDF5File(const char *filename, Params *p) {
     exit(1);
   }
 
+  H5Fset_mpi_atomicity(file_id, SET_MPI_ATOMIC);
+
   H5Pclose(file_access_properties);
 
   /* create dataspace */
@@ -366,6 +370,8 @@ void writeMPIIOFile(const char *filename, Params *p) {
     printf("Failed to open \"%s\". Cannot do MPI-IO test.\n", filename);
     return;
   }
+
+  MPI_File_set_atomicity(file, SET_MPI_ATOMIC);
   
   /* set the file view */
   MPI_File_set_view(file, 0, MPI_BYTE, file_type, "native", p->info);

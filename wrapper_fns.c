@@ -141,6 +141,8 @@ int MPI_File_open
    MPI_File *fh) {
   const char *prefix = "[0]  ";
 
+  /* amode |= MPI_MODE_UNIQUE_OPEN; */
+
   /*
   if (rank==0) {
     printf("[%d] MPI_File_open %s info:\n", rank, filename);
@@ -151,11 +153,29 @@ int MPI_File_open
   int result = PMPI_File_open(comm, filename, amode, info, fh);
   
   if (rank==0) {
-    printf("[%d] MPI_File_open(\"%s\", fh=%p)\n", rank, filename, (void*)*fh);
-    /* printFileInfo(*fh, prefix); */
+    char amode_str[200];
+    printf("[%d] MPI_File_open(\"%s\", amode=%s, fh=%p)\n",
+           rank, filename, formatAmode(amode_str, amode), (void*)*fh);
+    printFileInfo(*fh, prefix);
   }
   
   return result;
+}
+
+
+int MPI_File_sync(MPI_File fh) {
+  printf("[%d] MPI_file_sync(%p)\n", rank, (void*)fh);
+  return PMPI_File_sync(fh);
+}
+
+
+int MPI_file_seek(MPI_File fh, MPI_Offset offset, int whence) {
+  printf("[%d] MPI_File_seek(%p, %ld, %s)\n",
+         (void*)fh, (long)offset,
+         whence == MPI_SEEK_SET ? "SET" :
+         whence == MPI_SEEK_CUR ? "CUR" : 
+         whence == MPI_SEEK_END ? "END" : "<unknown>");
+  return MPI_File_seek(fh, offset, whence);
 }
 
 
@@ -174,6 +194,13 @@ int MPI_File_set_view
   return PMPI_File_set_view(fh, disp, etype, filetype, datarep, info);
 }
 
+
+int MPI_File_set_size(MPI_File fh, MPI_Offset size) {
+  if (rank==0)
+    printf("[%d] MPI_File_set_size(%p, %ld)\n", rank, (void*)fh, (long)size);
+  
+  return PMPI_File_set_size(fh, size);
+}
 
 
 int MPI_File_write_at(MPI_File fh, MPI_Offset offset, const void * buf, int count, MPI_Datatype datatype, MPI_Status * status) {
