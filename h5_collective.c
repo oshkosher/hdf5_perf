@@ -10,16 +10,16 @@
   Check which form of 'write' HDF5 is using.
 */
 
+#define MIMIC_HDF5_DATATYPE 0
+
 #define DATASETNAME "/mydata"
 #define PRINT_PARTITIONS 0
-#define MIMIC_HDF5_DATATYPE 1
-#define SET_MPI_ATOMIC 0
 
 int rank, np;
 
 /* note: these are incompatible with Darshan. If these are enabled, run
    "module unload darshan" before compiling. */
-#include "wrapper_fns.c"
+/* #include "wrapper_fns.c" */
 
 typedef struct {
   int rows, cols;  /* global size */
@@ -38,7 +38,7 @@ void partition(int total_size, int np, int rank,
                int *offset, int *size);
 int check_internal(int status, char *filename, int line_no);
 void writeHDF5File(const char *filename, Params *p);
-void writeMPIIOFile(const char *filename, Params *p);
+void writeMPIIOFile(const char *filename, Params *p, int use_vector_type);
 
 #define check(s) check_internal(s, __FILE__, __LINE__)
 
@@ -63,7 +63,6 @@ int main(int argc, char **argv) {
     double mb = sizeof(double) * p.rows * p.cols / (1024.0 * 1024);
     printf("Write %dx%d grid (%.1f MiB) with %d ranks.\n",
            p.rows, p.cols, mb, np);
-    /* printf("MPI_ATOMIC=%d\n", SET_MPI_ATOMIC); */
   }
 
   makeFilenames(base_filename, &filename_h5, &filename_mpiio);
@@ -108,7 +107,8 @@ int main(int argc, char **argv) {
   MPI_Info_set(p.info, "striping_unit", tmp_str);
 
   writeHDF5File(filename_h5, &p);
-  writeMPIIOFile(filename_mpiio, &p);
+  writeMPIIOFile(filename_mpiio, &p, 1);
+  writeMPIIOFile(filename_mpiio, &p, 0);
 
   MPI_Info_free(&p.info);
   free(filename_h5);
@@ -253,8 +253,6 @@ void writeHDF5File(const char *filename, Params *p) {
     exit(1);
   }
 
-  H5Fset_mpi_atomicity(file_id, SET_MPI_ATOMIC);
-
   H5Pclose(file_access_properties);
 
   /* create dataspace */
@@ -319,7 +317,7 @@ void writeHDF5File(const char *filename, Params *p) {
 }
 
 
-void writeMPIIOFile(const char *filename, Params *p) {
+void writeMPIIOFile(const char *filename, Params *p, int use_vector_type) {
   int rank, status;
   MPI_File file;
   MPI_Datatype file_type, memory_type;
@@ -332,7 +330,7 @@ void writeMPIIOFile(const char *filename, Params *p) {
 
   MPI_Datatype element_type = MPI_DOUBLE;
 
-#if MIMIC_HDF5_DATATYPE
+#if 0
   /* define the full array on disk */
   MPI_Datatype double_bytes;
   MPI_Type_contiguous(sizeof(double), MPI_BYTE, &double_bytes);
@@ -348,11 +346,8 @@ void writeMPIIOFile(const char *filename, Params *p) {
   MPI_Type_free(&type2_hindex);
   MPI_Type_vector(1, p->rows, 1, type3_resized, &file_type);
   MPI_Type_free(&type3_resized);
+#endif
 
-  /* define the subarray in memory */
-  MPI_Type_vector(1, p->rows * p->col_count, 1, element_type, &memory_type);
-
-#else
   /* define the full array on disk */
   int full_sizes[2] = {p->rows, p->cols};
   int part_sizes[2] = {p->rows, p->col_count};
@@ -360,22 +355,18 @@ void writeMPIIOFile(const char *filename, Params *p) {
   MPI_Type_create_subarray(2, full_sizes, part_sizes, part_starts,
                            MPI_ORDER_C, element_type, &file_type);
 
-  /* define the subarray in memory */
-  MPI_Type_contiguous(p->rows * p->col_count, element_type, &memory_type);
-
-#endif
-
   MPI_Type_commit(&file_type);
-  MPI_Type_commit(&memory_type);
 
-  /*
-  if (rank == 0) {
-    char *s = mpiTypeSignature(file_type, NULL);
-    printf("mpiTypeSignature(file_type) = \"%s\"\n", s);
-    free(s);
+  /* define the subarray in memory */
+  if (use_vector_type) {
+    /* this is what HDF5 uses (H5Smpio.c in H5S_mpio_hyper_type()) */
+    MPI_Type_vector(1, p->rows * p->col_count, 1, element_type, &memory_type);
+  } else {
+    /* this is equivalent (I think?) and more efficient */
+    MPI_Type_contiguous(p->rows * p->col_count, element_type, &memory_type);
   }
-  */
 
+  MPI_Type_commit(&memory_type);
 
   /* open the file */
   remove(filename);
@@ -386,8 +377,6 @@ void writeMPIIOFile(const char *filename, Params *p) {
     return;
   }
 
-  MPI_File_set_atomicity(file, SET_MPI_ATOMIC);
-  
   /* set the file view */
   MPI_File_set_view(file, 0, MPI_BYTE, file_type, "native", p->info);
 
@@ -419,9 +408,9 @@ void writeMPIIOFile(const char *filename, Params *p) {
 
   MPI_Barrier(comm);
   if (rank == 0)
-    printf("MPI-IO write %s\n"
+    printf("MPI-IO write %s %s\n"
            "  Open %.3fs, write %.3fs, close %.3fs. Write %.1f MiB/s\n",
-           filename,
+           use_vector_type ? "vector" : "contiguous", filename,
            timer_open, timer_write, timer_close,
            (p->rows*p->cols*sizeof(double) / (timer_write * (1<<20))));
 }
