@@ -3,10 +3,12 @@
 #include <string.h>
 #include <assert.h>
 #include <string>
+#include <vector>
 #include <mpi.h>
 #include <hdf5.h>
 
 using std::string;
+using std::vector;
 
 #ifndef H5_HAVE_PARALLEL
 #error No HDF5 parallel
@@ -38,6 +40,8 @@ public:
   int& operator[](size_t i) {return coord[i];}
   int operator[](size_t i) const {return coord[i];}
 
+  const int* array() const {return &coord[0];}
+
   // parse a string in the form "x,y,z". Return false on error.
   bool parse(const char *str) {
     if (3 == sscanf(str, "%d,%d,%d", coord, coord+1, coord+2))
@@ -62,19 +66,20 @@ public:
   }
 };
 
+
 struct Params {
   Triple global_size;  /* global size */
-  Triple rank_coords;  /* 3-d coordinates for this rank */
   Triple local_starts, local_counts;  /* this process's subgrid */
   int grid_count;  /* how many grids to write */
 
   MPI_Comm cart_comm;
   int cart_rank;  // rank in cart_comm
-  Triple cart_coords;
+  Triple cart_coords;  // 3-d coordinates
 
-  double *data;  /* this process's data */
+  vector<double> data;  /* this process's data */
   MPI_Info info;  /* striping settings */
 };
+
 
 bool parseArgs(int argc, char **argv, string &filename,
                Triple &global_size, Triple &rank_splits,
@@ -82,14 +87,16 @@ bool parseArgs(int argc, char **argv, string &filename,
                int &stripe_count, int &stripe_len);
 void fail();
 void printHelp();
-bool setupData(Params &p, const Triple &rank_splits);
+bool setupData(Params &p, const Triple &rank_splits,
+               int stripe_count, int stripe_len);
 void partition(int total_size, int np, int rank, 
                int &offset, int &size);
-/*
+
 int h5_check_internal(int status, char *filename, int line_no);
-void writeHDF5File(const char *filename, Params *p);
-void writeMPIIOFile(const char *filename, Params *p, int use_vector_type);
-*/
+// void writeHDF5File(const char *filename, Params *p);
+void writeMPIIOFile(const char *filename, Params &p,
+                    bool use_vector_type = false);
+
 
 #define h5check(s) h5_check_internal(s, __FILE__, __LINE__)
 
@@ -122,51 +129,22 @@ int main(int argc, char **argv) {
   filename_h5 = base_filename + ".h5";
   filename_mpiio = base_filename + ".mpiio";
 
-  if (!setupData(p, rank_splits))
-    fail();
-
-#if 0  
-  /* each process writes (p.rows) rows and approximately (p.cols/np) columns. */
-  // partition(p.cols, np, rank, &p.col_start, &p.col_count);
-
+  MPI_Barrier(MPI_COMM_WORLD);
   timer = MPI_Wtime();
-  size_t data_size_bytes = sizeof(double) * p.rows * p.col_count;
-  p.data = (double*) malloc(data_size_bytes);
-  if (!p.data) {
-    printf("[%d] ERROR failed to allocate %ld bytes\n",
-           rank, (long)(data_size_bytes));
-    exit(1);
-  }
 
-  /* fill the data */
-  for (int y=0; y < p.rows; y++) {
-    for (int x=0; x < p.col_count; x++) {
-      p.data[y * p.col_count + x] = rank + .01*y + .0001 * (x + p.col_start);
-    }
-  }
+  if (!setupData(p, rank_splits, stripe_count, stripe_len))
+    fail();
 
   MPI_Barrier(MPI_COMM_WORLD);
 
   if (rank == 0)
     printf("Init time: %.6f\n", MPI_Wtime() - timer);
 
-  /* set the file striping parameters */
-  MPI_Info_create(&p.info);
-  char tmp_str[50];
-  sprintf(tmp_str, "%d", stripe_count);
-  MPI_Info_set(p.info, "striping_factor", tmp_str);
-  sprintf(tmp_str, "%d", stripe_len);
-  MPI_Info_set(p.info, "striping_unit", tmp_str);
 
-  writeHDF5File(filename_h5, &p);
-  writeMPIIOFile(filename_mpiio, &p, 1);
-  writeMPIIOFile(filename_mpiio, &p, 0);
+  // writeHDF5File(filename_h5, &p);
+  writeMPIIOFile(filename_mpiio.c_str(), p);
 
   MPI_Info_free(&p.info);
-  free(filename_h5);
-  free(filename_mpiio);
-  free(p.data);
-#endif
 
   MPI_Finalize();
 
@@ -264,20 +242,24 @@ void fail() {
 }
 
 
-bool setupData(Params &p, const Triple &rank_splits) {
+bool setupData(Params &p, const Triple &rank_splits,
+               int stripe_count, int stripe_len) {
+  // create a cartesian communicator
   int periodic[3] = {0, 0, 0};
   MPI_Cart_create(MPI_COMM_WORLD, 3, rank_splits.coord, periodic, 1,
                   &p.cart_comm);
-  
+
+  // compute my 1-d and 3-d coordinates in the cartesian communicator
   MPI_Comm_rank(p.cart_comm, &p.cart_rank);
   MPI_Cart_coords(p.cart_comm, p.cart_rank, 3, p.cart_coords.coord);
 
-  // determine which subcube each rank is assigned
+  // determine which subcube this rank is assigned
   for (int i=0; i < 3; i++) {
     partition(p.global_size[i], rank_splits[i], p.cart_coords[i],
               p.local_starts[i], p.local_counts[i]);
   }
 
+  // debug output
   for (int i=0; i < np; i++) {
     if (i==rank) {
       printf("[%d] cart_rank=%d cart_coords=%s grid=[%d-%d, %d-%d, %d-%d]\n",
@@ -288,6 +270,33 @@ bool setupData(Params &p, const Triple &rank_splits) {
     }
     MPI_Barrier(MPI_COMM_WORLD);
   }
+
+  p.data.resize(p.local_counts.product());
+
+  /* fill the data */
+  for (int z=0; z < p.local_counts[0]; z++) {
+    int z_offset = z * p.local_counts[1] * p.local_counts[2];
+
+    for (int y=0; y < p.local_counts[1]; y++) {
+      int y_offset = y * p.local_counts[2];
+
+      for (int x=0; x < p.local_counts[2]; x++) {
+
+        p.data[z_offset + y_offset + x] = rank
+          + .01 * (z + p.local_starts[0])
+          + .0001 * (y + p.local_starts[1])
+          + .000001 * (x + p.local_starts[2]);
+      }
+    }
+  }
+  
+  /* set the file striping parameters */
+  MPI_Info_create(&p.info);
+  char tmp_str[50];
+  sprintf(tmp_str, "%d", stripe_count);
+  MPI_Info_set(p.info, "striping_factor", tmp_str);
+  sprintf(tmp_str, "%d", stripe_len);
+  MPI_Info_set(p.info, "striping_unit", tmp_str);
   
   return true;
 }
@@ -412,6 +421,7 @@ void writeHDF5File(const char *filename, Params *p) {
            timer_open, timer_write, timer_close,
            (p->rows*p->cols*sizeof(double) / (timer_write * (1<<20))));
 }
+#endif
 
 
 /*
@@ -419,7 +429,7 @@ void writeHDF5File(const char *filename, Params *p) {
   If use_vector_type use an MPI_Type_vector for the memory array, otherwise
   an MPI_Type_contiguous.
 */
-void writeMPIIOFile(const char *filename, Params *p, int use_vector_type) {
+void writeMPIIOFile(const char *filename, Params &p, bool use_vector_type) {
   int rank, status;
   MPI_File file;
   MPI_Datatype file_type, memory_type;
@@ -432,40 +442,21 @@ void writeMPIIOFile(const char *filename, Params *p, int use_vector_type) {
 
   MPI_Datatype element_type = MPI_DOUBLE;
 
-#if 0
-  /* define the full array on disk using the same datatypes as HDF5 */
-  MPI_Datatype double_bytes;
-  MPI_Type_contiguous(sizeof(double), MPI_BYTE, &double_bytes);
-  MPI_Type_commit(&double_bytes);
-  element_type = double_bytes;
-  MPI_Datatype type1_vec, type2_hindex, type3_resized;
-  MPI_Type_vector(1, p->col_count, 1, element_type, &type1_vec);
-  int hindex_len = 1;
-  MPI_Aint hindex_offset = p->col_start * sizeof(double);
-  MPI_Type_create_hindexed(1, &hindex_len, &hindex_offset, type1_vec, &type2_hindex);
-  MPI_Type_free(&type1_vec);
-  MPI_Type_create_resized(type2_hindex, 0, sizeof(double) * p->cols, &type3_resized);
-  MPI_Type_free(&type2_hindex);
-  MPI_Type_vector(1, p->rows, 1, type3_resized, &file_type);
-  MPI_Type_free(&type3_resized);
-#endif
-
   /* define a type for the full array on disk */
-  int full_sizes[2] = {p->rows, p->cols};
-  int part_sizes[2] = {p->rows, p->col_count};
-  int part_starts[2] = {0, p->col_start};
-  MPI_Type_create_subarray(2, full_sizes, part_sizes, part_starts,
+  MPI_Type_create_subarray(3, p.global_size.array(), p.local_counts.array(),
+                           p.local_starts.array(),
                            MPI_ORDER_C, element_type, &file_type);
 
   MPI_Type_commit(&file_type);
 
   /* define a type for the subarray in memory */
+  int element_count = p.local_counts.product();
   if (use_vector_type) {
     /* this is what HDF5 uses (H5Smpio.c in H5S_mpio_hyper_type()) */
-    MPI_Type_vector(1, p->rows * p->col_count, 1, element_type, &memory_type);
+    MPI_Type_vector(1, element_count, 1, element_type, &memory_type);
   } else {
     /* this is equivalent and more efficient in some cases */
-    MPI_Type_contiguous(p->rows * p->col_count, element_type, &memory_type);
+    MPI_Type_contiguous(element_count, element_type, &memory_type);
   }
 
   MPI_Type_commit(&memory_type);
@@ -473,14 +464,14 @@ void writeMPIIOFile(const char *filename, Params *p, int use_vector_type) {
   /* open the file */
   remove(filename);
   status = MPI_File_open(comm, filename, MPI_MODE_RDWR | MPI_MODE_CREATE,
-                         p->info, &file);
+                         p.info, &file);
   if (status != MPI_SUCCESS) {
     printf("Failed to open \"%s\". Cannot do MPI-IO test.\n", filename);
     return;
   }
 
   /* set the file view */
-  MPI_File_set_view(file, 0, MPI_BYTE, file_type, "native", p->info);
+  MPI_File_set_view(file, 0, file_type, file_type, "native", p.info);
 
   MPI_Barrier(comm);
   timer_open = MPI_Wtime() - timer_open;
@@ -489,14 +480,17 @@ void writeMPIIOFile(const char *filename, Params *p, int use_vector_type) {
   MPI_Status status2;
   int count_written;
   timer_write = MPI_Wtime();
-  status = MPI_File_write_at_all(file, 0, p->data, 1, memory_type, &status2);
-  if (status != MPI_SUCCESS) {
-    printf("[%d] MPI_File_write failed, error = %d\n", rank, status);
-    return;
+  for (int grid_no=0; grid_no < p.grid_count; grid_no++) {
+    status = MPI_File_write_at_all(file, grid_no, p.data.data(), 1,
+                                   memory_type, &status2);
+    if (status != MPI_SUCCESS) {
+      printf("[%d] MPI_File_write failed, error = %d\n", rank, status);
+      return;
+    }
+    MPI_Get_count(&status2, memory_type, &count_written);
+    if (count_written != 1)
+      printf("[%d] MPI_File_write_at_all count=%d\n", rank, count_written);
   }
-  MPI_Get_count(&status2, memory_type, &count_written);
-  if (count_written != 1)
-    printf("[%d] MPI_File_write_at_all count=%d\n", rank, count_written);
   MPI_Barrier(comm);
   timer_write = MPI_Wtime() - timer_write;
 
@@ -509,12 +503,12 @@ void writeMPIIOFile(const char *filename, Params *p, int use_vector_type) {
   timer_close = MPI_Wtime() - timer_close;
 
   MPI_Barrier(comm);
-  if (rank == 0)
+  if (rank == 0) {
+    int64_t bytes = p.grid_count * p.global_size.product() * sizeof(double);
     printf("MPI-IO write %s %s\n"
            "  Open %.3fs, write %.3fs, close %.3fs. Write %.1f MiB/s\n",
            use_vector_type ? "vector" : "contiguous", filename,
            timer_open, timer_write, timer_close,
-           (p->rows*p->cols*sizeof(double) / (timer_write * (1<<20))));
+           (bytes / (timer_write * (1<<20))));
+  }
 }
-
-#endif
