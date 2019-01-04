@@ -1,7 +1,7 @@
 default: all
 
-EXECS=h5_collective
-OPT=-g
+EXECS=h5_collective pc2orio2
+OPT=-O3
 
 # darshan-parser-nonzero /tmp/io.darshan | grep POSIX_ACCESS
 
@@ -13,6 +13,7 @@ LIB=-L$(HDF_HOME)/lib -lhdf5 -Wl,-rpath -Wl,$(HDF_HOME)/lib
 INC=-I$(HDF_HOME)/include
 CC=cc $(INC) $(OPT)
 MPICC=cc -DCRAY_MPI $(OPT) $(INC)
+MPICXX=CC -DCRAY_MPI $(OPT) $(INC)
 DARSHAN_RUNTIME=
 
 else
@@ -23,6 +24,7 @@ INC=-I$(HDF_HOME)/include -I$(MPI_HOME)/include
 LIB=-L$(HDF_HOME)/lib -L$(MPI_HOME)/lib -lhdf5 -lmpi -Wl,-rpath -Wl,$(HDF_HOME)/lib
 CC=gcc $(OPT) $(INC)
 MPICC=mpicc $(OPT) $(INC)
+MPICXX=mpicxx $(OPT) $(INC)
 # DARSHAN_LOGFILE=/tmp/io.darshan
 # DARSHAN_RUNTIME=DXT_ENABLE_IO_TRACE=4 LD_PRELOAD=/usr/local/darshan3-runtime/lib/libdarshan.so DARSHAN_LOGFILE=$(DARSHAN_LOGFILE)
 
@@ -33,12 +35,12 @@ all: $(EXECS)
 h5_collective: h5_collective.c wrapper_fns.c
 	$(MPICC) $< $(LIB) -o $@
 
-run: h5_collective
-	mpirun -np 2 ./h5_collective /tmp/test_io 10 10
-	rm -f /tmp/test_io
+pc2orio2: pc2orio2.cc
+	$(MPICXX) $< $(LIB) -lstdc++ -o $@
 
-compare_write_sequence:
-	grep 'X_POSIX[ 0]*write' meshio_large_file_details.txt | head -954 | cutfast -w -f 6,7 | ./sequence_extract.py busy
+run: pc2orio2
+	mpirun -np 2 ./pc2orio2 /tmp/test_io 100,100,100 2,1,1 3
+	rm -f /tmp/test_io*
 
 clean:
 	rm -f $(EXECS) *.o *~

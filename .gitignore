@@ -1,9 +1,10 @@
 *~
 *.o
 h5_collective
-foo
+foo*
 sample.darshan.txt
 *.run
 *.darshan
 *.err
 *.out
+pc2orio2

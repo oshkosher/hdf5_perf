@@ -2,22 +2,38 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <mpi.h>
 #include <hdf5.h>
 
+#ifndef H5_HAVE_PARALLEL
+#error No HDF5 parallel
+#endif
+
+
 /*
-  Profile MPI_File_open() and MPI_File_set_view() calls.
-  Check the info values before and after the call.
-  Check which form of 'write' HDF5 is using.
+  Compare performance writing 2-d mesh via HDF5 vs. MPI-IO directly.
+
+  Each process holds vertical strips of data.
+
+  +-----+-----+-----+-----+
+  |P0   |P1   |P2   |P3   |
+  |     |     |     |     |
+  |     |     |     |     |
+  |     |     |     |     |
+  +-----+-----+-----+-----+
+  
+  When stripe_count > 1, HDF5 tends to be much slower (as of HDF5 version 1.10.4).
+  Changing from MPI_Type_vector() to MPI_Type_contiguous() in H5S_mpio_hyper_type()
+  improves the performance of HDF5 to be about the same as MPI-IO.
+
+  Ed Karrels, edk@illinois.edu, December 2018
 */
 
-#define MIMIC_HDF5_DATATYPE 0
-
-#define DATASETNAME "/mydata"
-#define PRINT_PARTITIONS 0
 
 int rank, np;
 
-/* note: these are incompatible with Darshan. If these are enabled, run
+/* Wrapper functions used for debugging.
+   These are incompatible with Darshan. If these are enabled, run
    "module unload darshan" before compiling. */
 /* #include "wrapper_fns.c" */
 
@@ -36,11 +52,12 @@ void makeFilenames(const char *base_filename, char **filename_h5,
 void printHelp();
 void partition(int total_size, int np, int rank, 
                int *offset, int *size);
-int check_internal(int status, char *filename, int line_no);
+int h5_check_internal(int status, char *filename, int line_no);
 void writeHDF5File(const char *filename, Params *p);
 void writeMPIIOFile(const char *filename, Params *p, int use_vector_type);
 
-#define check(s) check_internal(s, __FILE__, __LINE__)
+#define h5check(s) h5_check_internal(s, __FILE__, __LINE__)
+
 
 int main(int argc, char **argv) {
   double timer;
@@ -58,26 +75,17 @@ int main(int argc, char **argv) {
                 &stripe_count, &stripe_len))
     exit(1);
 
-
   if (rank==0) {
     double mb = sizeof(double) * p.rows * p.cols / (1024.0 * 1024);
-    printf("Write %dx%d grid (%.1f MiB) with %d ranks.\n",
-           p.rows, p.cols, mb, np);
+    printf("Write %dx%d grid (%.1f MiB), %d ranks, "
+           "stripe_count=%d, stripe_len=%d\n",
+           p.rows, p.cols, mb, np, stripe_count, stripe_len);
   }
 
   makeFilenames(base_filename, &filename_h5, &filename_mpiio);
   
-  /* each process writes every row, but only a portion of each row */
+  /* each process writes (p.rows) rows and approximately (p.cols/np) columns. */
   partition(p.cols, np, rank, &p.col_start, &p.col_count);
-
-#if PRINT_PARTITIONS
-  for (int r=0; r < np; r++) {
-    if (rank == r)
-      printf("[%d] %d..%d\n", rank, p.col_start,
-             p.col_start + p.col_count - 1);
-    MPI_Barrier(MPI_COMM_WORLD);
-  }
-#endif
 
   timer = MPI_Wtime();
   size_t data_size_bytes = sizeof(double) * p.rows * p.col_count;
@@ -87,6 +95,8 @@ int main(int argc, char **argv) {
            rank, (long)(data_size_bytes));
     exit(1);
   }
+
+  /* fill the data */
   for (int y=0; y < p.rows; y++) {
     for (int x=0; x < p.col_count; x++) {
       p.data[y * p.col_count + x] = rank + .01*y + .0001 * (x + p.col_start);
@@ -213,7 +223,7 @@ void partition(int total_size, int np, int rank,
 }
 
 
-int check_internal(int status, char *filename, int line_no) {
+int h5_check_internal(int status, char *filename, int line_no) {
   if (status < 0)
     printf("[%d] %s:%d status %d\n", rank, filename, line_no, status);
   return status;
@@ -221,12 +231,7 @@ int check_internal(int status, char *filename, int line_no) {
 
 
 /*
-  for 10x10 data, here is the filetype (in the call to MPI_File_set_view
-    vector count=1, blocklength=10, stride=1 of:
-      create_resized lb=0, extent=80 of:
-        create_hindexed count=1 (1 at offset 0) of:
-          vector count=1, blocklength=5, stride=1 of:
-            contiguous 8 MPI_BYTE
+  Write the data using HDF5. This calls MPI_File_write_at_all() internally.
 */
 void writeHDF5File(const char *filename, Params *p) {
   hid_t file_id=-1, dataset_id=-1, dataspace_id=-1, memspace_id=-1;
@@ -258,30 +263,30 @@ void writeHDF5File(const char *filename, Params *p) {
   /* create dataspace */
   hsize_t full_dims[2] = {p->rows, p->cols};
   dataspace_id = H5Screate_simple(2, full_dims, NULL);
-  check(dataspace_id);
+  h5check(dataspace_id);
 
   /* create the dataset */
   dataset_id = H5Dcreate2
-    (file_id, DATASETNAME, H5T_NATIVE_DOUBLE, dataspace_id,
+    (file_id, "/mydata", H5T_NATIVE_DOUBLE, dataspace_id,
      H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-  check(dataset_id);
+  h5check(dataset_id);
 
   /* define the subset of data I'll write */
   hsize_t file_offsets[2] = {0, p->col_start};
   hsize_t file_sizes[2] = {p->rows, p->col_count};
   status = H5Sselect_hyperslab(dataspace_id, H5S_SELECT_SET, file_offsets,
                                NULL, file_sizes, NULL);
-  check(status);
+  h5check(status);
   
   /* define the shape of the memory buffer */
   hsize_t mem_offsets[2] = {0, 0};
   hsize_t mem_sizes[2] = {p->rows, p->col_count};
   memspace_id = H5Screate_simple(2, mem_sizes, NULL);
-  check(memspace_id);
+  h5check(memspace_id);
 
   status = H5Sselect_hyperslab(memspace_id, H5S_SELECT_SET, mem_offsets,
                                NULL, mem_sizes, NULL);
-  check(status);
+  h5check(status);
 
   MPI_Barrier(MPI_COMM_WORLD);
   timer_open = MPI_Wtime() - timer_open;
@@ -290,21 +295,21 @@ void writeHDF5File(const char *filename, Params *p) {
   timer_write = MPI_Wtime();
   hid_t io_prop = H5Pcreate(H5P_DATASET_XFER);
   status = H5Pset_dxpl_mpio(io_prop, H5FD_MPIO_COLLECTIVE);
-  check(status);
+  h5check(status);
 
   status = H5Dwrite(dataset_id, H5T_NATIVE_DOUBLE, memspace_id, dataspace_id,
                     io_prop, p->data);
-  check(status);
+  h5check(status);
   H5Pclose(io_prop);
   MPI_Barrier(MPI_COMM_WORLD);
   timer_write = MPI_Wtime() - timer_write;
 
   /* close the file */  
   timer_close = MPI_Wtime();
-  check(H5Sclose(memspace_id));
-  check(H5Dclose(dataset_id));
-  check(H5Sclose(dataspace_id));
-  check(H5Fclose(file_id));
+  h5check(H5Sclose(memspace_id));
+  h5check(H5Dclose(dataset_id));
+  h5check(H5Sclose(dataspace_id));
+  h5check(H5Fclose(file_id));
   MPI_Barrier(MPI_COMM_WORLD);
   timer_close = MPI_Wtime() - timer_close;
 
@@ -317,6 +322,11 @@ void writeHDF5File(const char *filename, Params *p) {
 }
 
 
+/*
+  Use MPI-IO directly to write the file.
+  If use_vector_type use an MPI_Type_vector for the memory array, otherwise
+  an MPI_Type_contiguous.
+*/
 void writeMPIIOFile(const char *filename, Params *p, int use_vector_type) {
   int rank, status;
   MPI_File file;
@@ -331,7 +341,7 @@ void writeMPIIOFile(const char *filename, Params *p, int use_vector_type) {
   MPI_Datatype element_type = MPI_DOUBLE;
 
 #if 0
-  /* define the full array on disk */
+  /* define the full array on disk using the same datatypes as HDF5 */
   MPI_Datatype double_bytes;
   MPI_Type_contiguous(sizeof(double), MPI_BYTE, &double_bytes);
   MPI_Type_commit(&double_bytes);
@@ -348,7 +358,7 @@ void writeMPIIOFile(const char *filename, Params *p, int use_vector_type) {
   MPI_Type_free(&type3_resized);
 #endif
 
-  /* define the full array on disk */
+  /* define a type for the full array on disk */
   int full_sizes[2] = {p->rows, p->cols};
   int part_sizes[2] = {p->rows, p->col_count};
   int part_starts[2] = {0, p->col_start};
@@ -357,12 +367,12 @@ void writeMPIIOFile(const char *filename, Params *p, int use_vector_type) {
 
   MPI_Type_commit(&file_type);
 
-  /* define the subarray in memory */
+  /* define a type for the subarray in memory */
   if (use_vector_type) {
     /* this is what HDF5 uses (H5Smpio.c in H5S_mpio_hyper_type()) */
     MPI_Type_vector(1, p->rows * p->col_count, 1, element_type, &memory_type);
   } else {
-    /* this is equivalent (I think?) and more efficient */
+    /* this is equivalent and more efficient in some cases */
     MPI_Type_contiguous(p->rows * p->col_count, element_type, &memory_type);
   }
 
