@@ -1,7 +1,7 @@
 *~
 *.o
 h5_collective
-foo
+foo*
 sample.darshan.txt
 *.run
 *.darshan

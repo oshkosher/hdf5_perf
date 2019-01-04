@@ -14,6 +14,7 @@ using std::vector;
 #error No HDF5 parallel
 #endif
 
+#define PRINT_TIMESTAMPS 0
 
 /*
   Test the writing of a file that contains multiple 3-d grids split equally
@@ -27,6 +28,7 @@ using std::vector;
 
 
 int rank, np;   // rank & size of MPI_COMM_WORLD
+double time0;
 
 
 class Triple {
@@ -64,6 +66,10 @@ public:
   bool isPositive() const {
     return coord[0] > 0 && coord[1] > 0 && coord[2] > 0;
   }
+
+  void toHsize(hsize_t dest[3]) {
+    for (int i=0; i < 3; i++) dest[i] = coord[i];
+  }
 };
 
 
@@ -91,12 +97,12 @@ bool setupData(Params &p, const Triple &rank_splits,
                int stripe_count, int stripe_len);
 void partition(int total_size, int np, int rank, 
                int &offset, int &size);
+void timestamp(const char *name);
+int h5_check_internal(int status, const char *filename, int line_no);
 
-int h5_check_internal(int status, char *filename, int line_no);
-// void writeHDF5File(const char *filename, Params *p);
+void writeHDF5File(const char *filename, Params &p);
 void writeMPIIOFile(const char *filename, Params &p,
                     bool use_vector_type = false);
-
 
 #define h5check(s) h5_check_internal(s, __FILE__, __LINE__)
 
@@ -111,6 +117,9 @@ int main(int argc, char **argv) {
   MPI_Init(&argc, &argv);
   MPI_Comm_size(MPI_COMM_WORLD, &np);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  time0 = MPI_Wtime();
+
+  timestamp("after MPI_Init");
 
   if (!parseArgs(argc, argv, base_filename, p.global_size,
                  rank_splits, p.grid_count, stripe_count, stripe_len))
@@ -132,17 +141,21 @@ int main(int argc, char **argv) {
   MPI_Barrier(MPI_COMM_WORLD);
   timer = MPI_Wtime();
 
+  timestamp("before setupData");
   if (!setupData(p, rank_splits, stripe_count, stripe_len))
     fail();
+  timestamp("after setupData");
 
   MPI_Barrier(MPI_COMM_WORLD);
 
   if (rank == 0)
     printf("Init time: %.6f\n", MPI_Wtime() - timer);
 
-
-  // writeHDF5File(filename_h5, &p);
+  timestamp("before writeHDF5File");
+  writeHDF5File(filename_h5.c_str(), p);
+  timestamp("after writeHDF5File");
   writeMPIIOFile(filename_mpiio.c_str(), p);
+  timestamp("after writeMPIIOFile");
 
   MPI_Info_free(&p.info);
 
@@ -260,6 +273,7 @@ bool setupData(Params &p, const Triple &rank_splits,
   }
 
   // debug output
+  /*
   for (int i=0; i < np; i++) {
     if (i==rank) {
       printf("[%d] cart_rank=%d cart_coords=%s grid=[%d-%d, %d-%d, %d-%d]\n",
@@ -270,6 +284,7 @@ bool setupData(Params &p, const Triple &rank_splits,
     }
     MPI_Barrier(MPI_COMM_WORLD);
   }
+  */
 
   p.data.resize(p.local_counts.product());
 
@@ -322,19 +337,24 @@ void partition(int total_size, int np, int rank,
 }
 
 
-int h5_check_internal(int status, char *filename, int line_no) {
+void timestamp(const char *name) {
+  if (PRINT_TIMESTAMPS && rank == 0) {
+    printf("%.6f %s\n", MPI_Wtime() - time0, name);
+  }
+}
+
+
+int h5_check_internal(int status, const char *filename, int line_no) {
   if (status < 0)
     printf("[%d] %s:%d status %d\n", rank, filename, line_no, status);
   return status;
 }
 
 
-#if 0
-
 /*
   Write the data using HDF5. This calls MPI_File_write_at_all() internally.
 */
-void writeHDF5File(const char *filename, Params *p) {
+void writeHDF5File(const char *filename, Params &p) {
   hid_t file_id=-1, dataset_id=-1, dataspace_id=-1, memspace_id=-1;
   int status=-1;
   double timer_open, timer_write, timer_close;
@@ -348,7 +368,7 @@ void writeHDF5File(const char *filename, Params *p) {
   timer_open = MPI_Wtime();
 
   file_access_properties = H5Pcreate(H5P_FILE_ACCESS);
-  H5Pset_fapl_mpio(file_access_properties, comm, p->info);
+  H5Pset_fapl_mpio(file_access_properties, comm, p.info);
 
   remove(filename);
 
@@ -361,67 +381,80 @@ void writeHDF5File(const char *filename, Params *p) {
 
   H5Pclose(file_access_properties);
 
-  /* create dataspace */
-  hsize_t full_dims[2] = {p->rows, p->cols};
-  dataspace_id = H5Screate_simple(2, full_dims, NULL);
-  h5check(dataspace_id);
-
-  /* create the dataset */
-  dataset_id = H5Dcreate2
-    (file_id, "/mydata", H5T_NATIVE_DOUBLE, dataspace_id,
-     H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-  h5check(dataset_id);
-
-  /* define the subset of data I'll write */
-  hsize_t file_offsets[2] = {0, p->col_start};
-  hsize_t file_sizes[2] = {p->rows, p->col_count};
-  status = H5Sselect_hyperslab(dataspace_id, H5S_SELECT_SET, file_offsets,
-                               NULL, file_sizes, NULL);
-  h5check(status);
-  
-  /* define the shape of the memory buffer */
-  hsize_t mem_offsets[2] = {0, 0};
-  hsize_t mem_sizes[2] = {p->rows, p->col_count};
-  memspace_id = H5Screate_simple(2, mem_sizes, NULL);
-  h5check(memspace_id);
-
-  status = H5Sselect_hyperslab(memspace_id, H5S_SELECT_SET, mem_offsets,
-                               NULL, mem_sizes, NULL);
-  h5check(status);
+  timestamp("HDF5 file created");
 
   MPI_Barrier(MPI_COMM_WORLD);
   timer_open = MPI_Wtime() - timer_open;
 
-  /* write content */
-  timer_write = MPI_Wtime();
-  hid_t io_prop = H5Pcreate(H5P_DATASET_XFER);
-  status = H5Pset_dxpl_mpio(io_prop, H5FD_MPIO_COLLECTIVE);
-  h5check(status);
+  hsize_t global_size[3], local_starts[3], local_counts[3];
+  p.global_size.toHsize(global_size);
+  p.local_starts.toHsize(local_starts);
+  p.local_counts.toHsize(local_counts);
 
-  status = H5Dwrite(dataset_id, H5T_NATIVE_DOUBLE, memspace_id, dataspace_id,
-                    io_prop, p->data);
-  h5check(status);
-  H5Pclose(io_prop);
+  timer_write = MPI_Wtime();
+
+  for (int grid_no=0; grid_no < p.grid_count; grid_no++) {
+    char dataset_name[40];
+    sprintf(dataset_name, "/data.%d", grid_no);
+
+    /* create dataspace */
+    dataspace_id = H5Screate_simple(3, global_size, NULL);
+    h5check(dataspace_id);
+
+    /* create the dataset */
+    dataset_id = H5Dcreate2
+      (file_id, dataset_name, H5T_NATIVE_DOUBLE, dataspace_id,
+       H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    h5check(dataset_id);
+
+    /* define the subset of data I'll write */
+    status = H5Sselect_hyperslab(dataspace_id, H5S_SELECT_SET, local_starts,
+                                 NULL, local_counts, NULL);
+    h5check(status);
+  
+    /* define the shape of the memory buffer */
+    hsize_t mem_offsets[3] = {0, 0, 0};
+    memspace_id = H5Screate_simple(3, local_counts, NULL);
+    h5check(memspace_id);
+
+    status = H5Sselect_hyperslab(memspace_id, H5S_SELECT_SET, mem_offsets,
+                                 NULL, local_counts, NULL);
+    h5check(status);
+
+    /* write content */
+    hid_t io_prop = H5Pcreate(H5P_DATASET_XFER);
+    status = H5Pset_dxpl_mpio(io_prop, H5FD_MPIO_COLLECTIVE);
+    h5check(status);
+
+    status = H5Dwrite(dataset_id, H5T_NATIVE_DOUBLE, memspace_id, dataspace_id,
+                      io_prop, p.data.data());
+    h5check(status);
+    H5Pclose(io_prop);
+    h5check(H5Sclose(memspace_id));
+    h5check(H5Dclose(dataset_id));
+    h5check(H5Sclose(dataspace_id));
+
+    timestamp("dataset written");
+  }
+
   MPI_Barrier(MPI_COMM_WORLD);
   timer_write = MPI_Wtime() - timer_write;
 
   /* close the file */  
   timer_close = MPI_Wtime();
-  h5check(H5Sclose(memspace_id));
-  h5check(H5Dclose(dataset_id));
-  h5check(H5Sclose(dataspace_id));
   h5check(H5Fclose(file_id));
   MPI_Barrier(MPI_COMM_WORLD);
   timer_close = MPI_Wtime() - timer_close;
 
-  if (rank == 0)
+  if (rank == 0) {
+    int64_t bytes = p.grid_count * p.global_size.product() * sizeof(double);
     printf("HDF5 write %s\n"
            "  Open %.3fs, write %.3fs, close %.3fs. Write %.1f MiB/s\n",
            filename,
            timer_open, timer_write, timer_close,
-           (p->rows*p->cols*sizeof(double) / (timer_write * (1<<20))));
+           (bytes / (timer_write * (1<<20))));
+  }
 }
-#endif
 
 
 /*
@@ -475,6 +508,7 @@ void writeMPIIOFile(const char *filename, Params &p, bool use_vector_type) {
 
   MPI_Barrier(comm);
   timer_open = MPI_Wtime() - timer_open;
+  timestamp("MPI-IO file created");
 
   /* write the data */
   MPI_Status status2;
@@ -490,6 +524,7 @@ void writeMPIIOFile(const char *filename, Params &p, bool use_vector_type) {
     MPI_Get_count(&status2, memory_type, &count_written);
     if (count_written != 1)
       printf("[%d] MPI_File_write_at_all count=%d\n", rank, count_written);
+    timestamp("grid written");
   }
   MPI_Barrier(comm);
   timer_write = MPI_Wtime() - timer_write;

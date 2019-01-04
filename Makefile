@@ -1,7 +1,7 @@
 default: all
 
 EXECS=h5_collective pc2orio2
-OPT=-g
+OPT=-O3
 
 # darshan-parser-nonzero /tmp/io.darshan | grep POSIX_ACCESS
 
