@@ -8,10 +8,11 @@ OPT=-g
 # Blue Waters
 ifeq "$(shell hostname | head -c 8)" "h2ologin"
 
-LIB=
-INC=
-CC=cc $(OPT)
-MPICC=cc $(OPT)
+HDF_HOME=/u/sciteam/karrels/Install/hdf5-1.10.4-cray
+LIB=-L$(HDF_HOME)/lib -lhdf5 -Wl,-rpath -Wl,$(HDF_HOME)/lib
+INC=-I$(HDF_HOME)/include
+CC=cc $(INC) $(OPT)
+MPICC=cc -DCRAY_MPI $(OPT) $(INC)
 DARSHAN_RUNTIME=
 
 else
