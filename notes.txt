@@ -1,0 +1,33 @@
+Change to hdf5-1.10.4/src/H5Smpio.c, near line 839
+
+       /****************************************
+       *  Build vector type of the selection.
+       ****************************************/
+       if (bigio_count >= d[i].count &&
+           bigio_count >= d[i].block &&
+           bigio_count >= d[i].strid) {
+
+           /* All the parameters fit into 32 bit integers so create the vector type normally */
+           /* EDK optimiztion */
+           if (d[i].count == 1) {
+               mpi_code = MPI_Type_contiguous((int)(d[i].block),       /* count */
+                                              inner_type,              /* old type */
+                                              &outer_type);            /* new type */
+               /* EDK */
+               printf("%s:%d MPI_Type_contiguous(%d, old_type=%x, new_type=%x)\n", __FILE__, __LINE__, (int)(d[i].block), (int)inner_type, (int)out\
+er_type);
+           } else {
+               mpi_code = MPI_Type_vector((int)(d[i].count),       /* count */
+                                          (int)(d[i].block),       /* blocklength */
+                                          (int)(d[i].strid),       /* stride */
+                                          inner_type,              /* old type */
+                                          &outer_type);            /* new type */
+               /* EDK */
+               printf("%s:%d MPI_Type_vector(%d, %d, %d, old_type=%x, new_type=%x)\n", __FILE__, __LINE__, (int)(d[i].count), (int)(d[i].block), (i\
+nt)(d[i].strid), (int)inner_type, (int)outer_type);
+           }
+
+           MPI_Type_free(&inner_type);
+           if(mpi_code != MPI_SUCCESS)
+              HMPI_GOTO_ERROR(FAIL, "couldn't create MPI vector type", mpi_code)
+       }

@@ -8,3 +8,5 @@ sample.darshan.txt
 *.err
 *.out
 pc2orio2
+*.trc
+*.edf

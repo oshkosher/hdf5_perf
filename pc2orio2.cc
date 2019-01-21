@@ -117,9 +117,11 @@ int main(int argc, char **argv) {
   MPI_Init(&argc, &argv);
   MPI_Comm_size(MPI_COMM_WORLD, &np);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-  time0 = MPI_Wtime();
 
+  time0 = MPI_Wtime();
   timestamp("after MPI_Init");
+
+  // printf("Hello from rank %d\n", rank);
 
   if (!parseArgs(argc, argv, base_filename, p.global_size,
                  rank_splits, p.grid_count, stripe_count, stripe_len))
@@ -158,7 +160,7 @@ int main(int argc, char **argv) {
   timestamp("after writeMPIIOFile");
 
   MPI_Info_free(&p.info);
-
+  MPI_Comm_free(&p.cart_comm);
   MPI_Finalize();
 
   return 0;
@@ -427,7 +429,7 @@ void writeHDF5File(const char *filename, Params &p) {
     h5check(status);
 
     status = H5Dwrite(dataset_id, H5T_NATIVE_DOUBLE, memspace_id, dataspace_id,
-                      io_prop, p.data.data());
+                      io_prop, /* p.data.data() */ &p.data[0] );
     h5check(status);
     H5Pclose(io_prop);
     h5check(H5Sclose(memspace_id));
@@ -515,7 +517,7 @@ void writeMPIIOFile(const char *filename, Params &p, bool use_vector_type) {
   int count_written;
   timer_write = MPI_Wtime();
   for (int grid_no=0; grid_no < p.grid_count; grid_no++) {
-    status = MPI_File_write_at_all(file, grid_no, p.data.data(), 1,
+    status = MPI_File_write_at_all(file, grid_no, /* p.data.data() */ &p.data[0], 1,
                                    memory_type, &status2);
     if (status != MPI_SUCCESS) {
       printf("[%d] MPI_File_write failed, error = %d\n", rank, status);
