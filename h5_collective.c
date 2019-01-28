@@ -97,8 +97,9 @@ int main(int argc, char **argv) {
   }
 
   /* fill the data */
-  for (int y=0; y < p.rows; y++) {
-    for (int x=0; x < p.col_count; x++) {
+  int x, y;
+  for (y=0; y < p.rows; y++) {
+    for (x=0; x < p.col_count; x++) {
       p.data[y * p.col_count + x] = rank + .01*y + .0001 * (x + p.col_start);
     }
   }

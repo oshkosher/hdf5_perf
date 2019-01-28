@@ -15,6 +15,8 @@ using std::vector;
 #endif
 
 #define PRINT_TIMESTAMPS 0
+#define MB (1024*1024)
+#define MBF (1024.*1024)
 
 /*
   Test the writing of a file that contains multiple 3-d grids split equally
@@ -22,6 +24,8 @@ using std::vector;
 
   Compare HDF5 where each grid is a dataspace and MPI-IO, where each grid
   is appended to the file.
+
+  Target data size: 4000x4000x2000 doubles
 
   Ed Karrels, edk@illinois.edu, December 2018
 */
@@ -43,6 +47,7 @@ public:
   int operator[](size_t i) const {return coord[i];}
 
   const int* array() const {return &coord[0];}
+  void clear() {coord[0] = coord[1] = coord[2] = 0;}
 
   // parse a string in the form "x,y,z". Return false on error.
   bool parse(const char *str) {
@@ -77,6 +82,7 @@ struct Params {
   Triple global_size;  /* global size */
   Triple local_starts, local_counts;  /* this process's subgrid */
   int grid_count;  /* how many grids to write */
+  int stripe_count, stripe_len;
 
   MPI_Comm cart_comm;
   int cart_rank;  // rank in cart_comm
@@ -93,8 +99,7 @@ bool parseArgs(int argc, char **argv, string &filename,
                int &stripe_count, int &stripe_len);
 void fail();
 void printHelp();
-bool setupData(Params &p, const Triple &rank_splits,
-               int stripe_count, int stripe_len);
+bool setupData(Params &p, const Triple &rank_splits);
 void partition(int total_size, int np, int rank, 
                int &offset, int &size);
 void timestamp(const char *name);
@@ -109,7 +114,6 @@ void writeMPIIOFile(const char *filename, Params &p,
 
 int main(int argc, char **argv) {
   double timer;
-  int stripe_count = -1, stripe_len = -1;
   string base_filename, filename_h5, filename_mpiio;
   Triple rank_splits;
   Params p;
@@ -124,17 +128,17 @@ int main(int argc, char **argv) {
   // printf("Hello from rank %d\n", rank);
 
   if (!parseArgs(argc, argv, base_filename, p.global_size,
-                 rank_splits, p.grid_count, stripe_count, stripe_len))
+                 rank_splits, p.grid_count, p.stripe_count, p.stripe_len))
     fail();
 
   if (rank==0) {
     double mb = sizeof(double) * p.global_size.product() * p.grid_count
-      / (1024.0 * 1024);
+      / MBF;
     printf("Write %dx(%s) grids (%.1f MiB), %d ranks (%s), "
            "stripe_count=%d, stripe_len=%d\n",
            p.grid_count, p.global_size.str(),
            mb, np, rank_splits.str(),
-           stripe_count, stripe_len);
+           p.stripe_count, p.stripe_len);
   }
 
   filename_h5 = base_filename + ".h5";
@@ -144,7 +148,7 @@ int main(int argc, char **argv) {
   timer = MPI_Wtime();
 
   timestamp("before setupData");
-  if (!setupData(p, rank_splits, stripe_count, stripe_len))
+  if (!setupData(p, rank_splits))
     fail();
   timestamp("after setupData");
 
@@ -226,13 +230,18 @@ bool parseArgs(int argc, char **argv, string &filename,
   }
   argno++;
 
-  if (!rank_splits.parse(argv[argno]) ||
-      !rank_splits.isPositive()) {
+  // parse the rank splits
+  if (!rank_splits.parse(argv[argno])) {
     if (rank == 0)
-      printf("Invalid global size: %s\n", argv[argno]);
+      printf("Invalid rank splits: %s\n", argv[argno]);
     return false;
-  }
-  if (rank_splits.product() != np) {
+  } else if (rank_splits.product() == 0) {
+    rank_splits.clear();
+    MPI_Dims_create(np, 3, rank_splits.coord);
+    if (rank == 0)
+      printf("Rank splits set automatically: %d,%d,%d\n",
+             rank_splits[0], rank_splits[1], rank_splits[2]);
+  } else if (rank_splits.product() != np) {
     if (rank==0)
       printf("Invalid rank splits. np=%d, product of splits=%d\n",
              np, rank_splits.product());
@@ -257,8 +266,7 @@ void fail() {
 }
 
 
-bool setupData(Params &p, const Triple &rank_splits,
-               int stripe_count, int stripe_len) {
+bool setupData(Params &p, const Triple &rank_splits) {
   // create a cartesian communicator
   int periodic[3] = {0, 0, 0};
   MPI_Cart_create(MPI_COMM_WORLD, 3, rank_splits.coord, periodic, 1,
@@ -310,9 +318,9 @@ bool setupData(Params &p, const Triple &rank_splits,
   /* set the file striping parameters */
   MPI_Info_create(&p.info);
   char tmp_str[50];
-  sprintf(tmp_str, "%d", stripe_count);
+  sprintf(tmp_str, "%d", p.stripe_count);
   MPI_Info_set(p.info, "striping_factor", tmp_str);
-  sprintf(tmp_str, "%d", stripe_len);
+  sprintf(tmp_str, "%d", p.stripe_len);
   MPI_Info_set(p.info, "striping_unit", tmp_str);
   
   return true;
@@ -322,6 +330,7 @@ void printHelp() {
   fprintf(stderr, "\n"
           "  pc2orio2 [opt] <filename> <global_size> <rank_split> <grid_count>\n"
           "    global_size and rank_split are in the form x,y,z\n"
+          "    if rank_split contains a 0, split is automated\n"
           "  opt:\n"
           "    -stripe_count <n> : number of file stripes\n"
           "    -stripe_len <n> : length of file stripes, in MiB\n"
@@ -450,11 +459,19 @@ void writeHDF5File(const char *filename, Params &p) {
 
   if (rank == 0) {
     int64_t bytes = p.grid_count * p.global_size.product() * sizeof(double);
+    double size_mb;
+    double write_mbps = bytes / (timer_write * MB);
+    printf("hdf5_write np=%d size_mb=%.3f stripe_count=%d stripe_len_mb=%d "
+           "open_sec=%.3f write_sec=%.3f close_sec=%.3f write_mbps=%.3f\n",
+           np, bytes / MBF, p.stripe_count, p.stripe_len / MB,
+           timer_open, timer_write, timer_close, write_mbps);
+    /*
     printf("HDF5 write %s\n"
            "  Open %.3fs, write %.3fs, close %.3fs. Write %.1f MiB/s\n",
            filename,
            timer_open, timer_write, timer_close,
-           (bytes / (timer_write * (1<<20))));
+           (bytes / (timer_write * MB)));
+    */
   }
 }
 
@@ -542,10 +559,17 @@ void writeMPIIOFile(const char *filename, Params &p, bool use_vector_type) {
   MPI_Barrier(comm);
   if (rank == 0) {
     int64_t bytes = p.grid_count * p.global_size.product() * sizeof(double);
+    double write_mbps = bytes / (timer_write * MB);
+    printf("mpio_write np=%d size_mb=%.3f stripe_count=%d stripe_len_mb=%d "
+           "open_sec=%.3f write_sec=%.3f close_sec=%.3f write_mbps=%.3f\n",
+           np, bytes / MBF, p.stripe_count, p.stripe_len / MB,
+           timer_open, timer_write, timer_close, write_mbps);
+    /*
     printf("MPI-IO write %s %s\n"
            "  Open %.3fs, write %.3fs, close %.3fs. Write %.1f MiB/s\n",
            use_vector_type ? "vector" : "contiguous", filename,
            timer_open, timer_write, timer_close,
            (bytes / (timer_write * (1<<20))));
+    */
   }
 }
