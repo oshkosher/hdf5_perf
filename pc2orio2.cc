@@ -397,16 +397,27 @@ void writeHDF5File(const char *filename, Params &p) {
   MPI_Barrier(MPI_COMM_WORLD);
   timer_open = MPI_Wtime() - timer_open;
 
+  if (rank == 0) {
+    printf("Created %s\n"
+           "hdf5_open_write np=%d stripe_count=%d stripe_len_mb=%d "
+           "open_sec=%.3f\n",
+           filename,
+           np, p.stripe_count, p.stripe_len / MB, timer_open);
+           
+  }
+
   hsize_t global_size[3], local_starts[3], local_counts[3];
   p.global_size.toHsize(global_size);
   p.local_starts.toHsize(local_starts);
   p.local_counts.toHsize(local_counts);
+  int64_t bytes = p.global_size.product() * sizeof(double);
 
-  timer_write = MPI_Wtime();
 
   for (int grid_no=0; grid_no < p.grid_count; grid_no++) {
     char dataset_name[40];
     sprintf(dataset_name, "/data.%d", grid_no);
+
+    timer_write = MPI_Wtime();
 
     /* create dataspace */
     dataspace_id = H5Screate_simple(3, global_size, NULL);
@@ -446,10 +457,19 @@ void writeHDF5File(const char *filename, Params &p) {
     h5check(H5Sclose(dataspace_id));
 
     timestamp("dataset written");
-  }
 
-  MPI_Barrier(MPI_COMM_WORLD);
-  timer_write = MPI_Wtime() - timer_write;
+    MPI_Barrier(MPI_COMM_WORLD);
+    timer_write = MPI_Wtime() - timer_write;
+
+    if (rank == 0) {
+      double size_mb;
+      double write_mbps = bytes / (timer_write * MB);
+      printf("hdf5_write np=%d size_mb=%.3f stripe_count=%d stripe_len_mb=%d "
+             "write_sec=%.3f write_mbps=%.3f\n",
+             np, bytes / MBF, p.stripe_count, p.stripe_len / MB,
+             timer_write, write_mbps);
+    }
+  }
 
   /* close the file */  
   timer_close = MPI_Wtime();
@@ -457,14 +477,11 @@ void writeHDF5File(const char *filename, Params &p) {
   MPI_Barrier(MPI_COMM_WORLD);
   timer_close = MPI_Wtime() - timer_close;
 
-  if (rank == 0) {
-    int64_t bytes = p.grid_count * p.global_size.product() * sizeof(double);
-    double size_mb;
-    double write_mbps = bytes / (timer_write * MB);
-    printf("hdf5_write np=%d size_mb=%.3f stripe_count=%d stripe_len_mb=%d "
-           "open_sec=%.3f write_sec=%.3f close_sec=%.3f write_mbps=%.3f\n",
-           np, bytes / MBF, p.stripe_count, p.stripe_len / MB,
-           timer_open, timer_write, timer_close, write_mbps);
+  if (rank == 0)
+    printf("hdf5_close_write np=%d stripe_count=%d stripe_len_mb=%d "
+           "close_sec=%.3f\n",
+           np, p.stripe_count, p.stripe_len / MB, timer_close);
+
     /*
     printf("HDF5 write %s\n"
            "  Open %.3fs, write %.3fs, close %.3fs. Write %.1f MiB/s\n",
@@ -472,7 +489,7 @@ void writeHDF5File(const char *filename, Params &p) {
            timer_open, timer_write, timer_close,
            (bytes / (timer_write * MB)));
     */
-  }
+
 }
 
 
@@ -529,12 +546,21 @@ void writeMPIIOFile(const char *filename, Params &p, bool use_vector_type) {
   timer_open = MPI_Wtime() - timer_open;
   timestamp("MPI-IO file created");
 
+  if (rank == 0)
+    printf("Created %s\n"
+           "mpio_open_write np=%d stripe_count=%d stripe_len_mb=%d "
+           "open_sec=%.3f\n",
+           filename,
+           np, p.stripe_count, p.stripe_len / MB, timer_open);
+
   /* write the data */
   MPI_Status status2;
   int count_written;
-  timer_write = MPI_Wtime();
+  int64_t bytes = p.global_size.product() * sizeof(double);
+
   for (int grid_no=0; grid_no < p.grid_count; grid_no++) {
-    status = MPI_File_write_at_all(file, grid_no, /* p.data.data() */ &p.data[0], 1,
+    timer_write = MPI_Wtime();
+    status = MPI_File_write_at_all(file, grid_no, &p.data[0], 1,
                                    memory_type, &status2);
     if (status != MPI_SUCCESS) {
       printf("[%d] MPI_File_write failed, error = %d\n", rank, status);
@@ -544,9 +570,20 @@ void writeMPIIOFile(const char *filename, Params &p, bool use_vector_type) {
     if (count_written != 1)
       printf("[%d] MPI_File_write_at_all count=%d\n", rank, count_written);
     timestamp("grid written");
+
+    MPI_Barrier(comm);
+    timer_write = MPI_Wtime() - timer_write;
+
+    if (rank == 0) {
+      double size_mb;
+      double write_mbps = bytes / (timer_write * MB);
+      printf("mpio_write np=%d size_mb=%.3f stripe_count=%d stripe_len_mb=%d "
+             "write_sec=%.3f write_mbps=%.3f\n",
+             np, bytes / MBF, p.stripe_count, p.stripe_len / MB,
+             timer_write, write_mbps);
+    }
+
   }
-  MPI_Barrier(comm);
-  timer_write = MPI_Wtime() - timer_write;
 
   timer_close = MPI_Wtime();
   if (element_type != MPI_DOUBLE)
@@ -557,13 +594,21 @@ void writeMPIIOFile(const char *filename, Params &p, bool use_vector_type) {
   timer_close = MPI_Wtime() - timer_close;
 
   MPI_Barrier(comm);
+
+  if (rank == 0)
+    printf("mpio_close_write np=%d stripe_count=%d stripe_len_mb=%d "
+           "close_sec=%.3f\n",
+           np, p.stripe_count, p.stripe_len / MB, timer_close);
+
   if (rank == 0) {
+    /*
     int64_t bytes = p.grid_count * p.global_size.product() * sizeof(double);
     double write_mbps = bytes / (timer_write * MB);
     printf("mpio_write np=%d size_mb=%.3f stripe_count=%d stripe_len_mb=%d "
            "open_sec=%.3f write_sec=%.3f close_sec=%.3f write_mbps=%.3f\n",
            np, bytes / MBF, p.stripe_count, p.stripe_len / MB,
            timer_open, timer_write, timer_close, write_mbps);
+    */
     /*
     printf("MPI-IO write %s %s\n"
            "  Open %.3fs, write %.3fs, close %.3fs. Write %.1f MiB/s\n",
