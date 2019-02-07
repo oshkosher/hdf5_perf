@@ -37,6 +37,17 @@ int rank, np;
    "module unload darshan" before compiling. */
 /* #include "wrapper_fns.c" */
 
+int MPI_Allgather(const void *sendbuf, int sendcount, MPI_Datatype sendtype,
+                  void *recvbuf, int recvcount, MPI_Datatype recvtype,
+                  MPI_Comm comm);
+int count_MPI_Allgather = 0;
+int cumulative_MPI_Allgather = 0;
+int MPI_Irecv(void *buf, int count, MPI_Datatype datatype, int source,
+              int tag, MPI_Comm comm, MPI_Request * request);
+int MPI_Send(const void *buf, int count, MPI_Datatype datatype, int dest,
+             int tag, MPI_Comm comm);
+
+
 typedef struct {
   int rows, cols;  /* global size */
   int col_start, col_count;  /* this process' data */
@@ -118,8 +129,11 @@ int main(int argc, char **argv) {
   MPI_Info_set(p.info, "striping_unit", tmp_str);
 
   writeHDF5File(filename_h5, &p);
+  printf("[%d] Allgather (%d) %.6fs\n", rank, count_MPI_Allgather, cumulative_MPI_Allgather);
   writeMPIIOFile(filename_mpiio, &p, 1);
+  printf("[%d] Allgather (%d) %.6fs\n", rank, count_MPI_Allgather, cumulative_MPI_Allgather);
   writeMPIIOFile(filename_mpiio, &p, 0);
+  printf("[%d] Allgather (%d) %.6fs\n", rank, count_MPI_Allgather, cumulative_MPI_Allgather);
 
   MPI_Info_free(&p.info);
   free(filename_h5);
@@ -425,3 +439,37 @@ void writeMPIIOFile(const char *filename, Params *p, int use_vector_type) {
            timer_open, timer_write, timer_close,
            (p->rows*p->cols*sizeof(double) / (timer_write * (1<<20))));
 }
+
+#if 0
+int MPI_Allgather(const void *sendbuf, int sendcount, MPI_Datatype sendtype,
+                  void *recvbuf, int recvcount, MPI_Datatype recvtype,
+                  MPI_Comm comm) {
+  int result;
+  double start_time = MPI_Wtime();
+  count_MPI_Allgather++;
+
+  result = PMPI_Allgather(sendbuf, sendcount, sendtype,
+                          recvbuf, recvcount, recvtype, comm);
+
+  printf("[%d] allgather\n", rank);
+  cumulative_MPI_Allgather += MPI_Wtime() - start_time;
+
+  return result;
+}
+
+int MPI_Irecv(void *buf, int count, MPI_Datatype datatype, int source,
+              int tag, MPI_Comm comm, MPI_Request * request) {
+  int result;
+  result = PMPI_Irecv(buf, count, datatype, source, tag, comm, request);
+  printf("[%d] MPI_Irecv %d at %p\n", rank, count, buf);
+  return result;
+}
+
+int MPI_Send(const void *buf, int count, MPI_Datatype datatype, int dest,
+             int tag, MPI_Comm comm) {
+  int result;
+  result = PMPI_Send(buf, count, datatype, dest, tag, comm);
+  printf("[%d] MPI_Send %d at %p\n", rank, count, buf);
+  return result;
+}
+#endif

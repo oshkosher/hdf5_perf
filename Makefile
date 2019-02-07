@@ -1,6 +1,6 @@
 default: all
 
-EXECS=h5_collective pc2orio2
+EXECS=h5_collective pc2orio2 h5_collective_mpip
 OPT=-O3
 
 # darshan-parser-nonzero /tmp/io.darshan | grep POSIX_ACCESS
@@ -37,6 +37,10 @@ all: $(EXECS)
 
 h5_collective: h5_collective.c wrapper_fns.c
 	$(MPICC) $< $(LIB) -o $@
+
+# Be sure to set MPIP environment variable: export MPIP="-t 10.0"
+h5_collective_mpip: h5_collective.c
+	$(MPICC) $< -o $@ -L/usr/local/hdf5/lib -lhdf5 -L/usr/local/mpiP-3.4.1/lib -lmpiP -L/usr/local/libunwind/lib -lunwind -lbfd -lm
 
 UNWIND=/usr/local/libunwind-1.3
 io_wrappers.o: io_wrappers.c
@@ -78,4 +82,4 @@ tau: pc2orio2_tau
 	tau_convert -dump tau.trc tau.edf | head -100
 
 clean:
-	rm -f $(EXECS) *.o *~ *.trc *.edf *.slog2
+	rm -f $(EXECS) *.o *~ *.trc *.edf *.slog2 *.tmp

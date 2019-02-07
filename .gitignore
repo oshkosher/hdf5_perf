@@ -1,6 +1,7 @@
 *~
 *.o
 h5_collective
+h5_collective_mpip
 foo*
 sample.darshan.txt
 *.run
@@ -10,3 +11,4 @@ sample.darshan.txt
 pc2orio2
 *.trc
 *.edf
+*.mpiP
