@@ -1,4 +1,4 @@
-default: all
+default: io_wrappers.so h5_collective
 
 EXECS=h5_collective pc2orio2 h5_collective_mpip
 OPT=-O3
@@ -36,7 +36,7 @@ endif
 all: $(EXECS)
 
 h5_collective: h5_collective.c wrapper_fns.c
-	$(MPICC) $< $(LIB) -o $@
+	$(MPICC) $< $(LIB) -ldl -o $@
 
 # Be sure to set MPIP environment variable: export MPIP="-t 10.0"
 h5_collective_mpip: h5_collective.c
@@ -45,6 +45,9 @@ h5_collective_mpip: h5_collective.c
 UNWIND=/usr/local/libunwind-1.3
 io_wrappers.o: io_wrappers.c
 	gcc -c $< -I$(UNWIND)/include
+
+io_wrappers.so: io_wrappers.c
+	gcc -Wall -shared -fPIC $< -o $@ -ldl $(INC2)
 
 pc2orio2: pc2orio2.cc
 	$(MPICXX) $^ $(LIB) -lstdc++ -o $@

@@ -1,5 +1,6 @@
 *~
 *.o
+*.so
 h5_collective
 h5_collective_mpip
 foo*
