@@ -1,4 +1,4 @@
-default: all
+default: io_wrappers.so h5_collective
 
 EXECS=h5_collective pc2orio2 h5_collective_mpip h5_collective_wrapped
 OPT=-g -O0
@@ -36,10 +36,10 @@ endif
 all: $(EXECS)
 
 h5_collective: h5_collective.c
-	$(MPICC) $< $(LIB) -o $@
+	$(MPICC) $< $(LIB) -ldl -o $@
 
 # gcc -g3 -O0 -pthread -I/usr/local/hdf5/include h5_collective.c wrapper_fns2.c -L/usr/local/hdf5/lib -lhdf5 -Wl,-rpath -Wl,/usr/local/hdf5/lib -Wl,-wrap=write -Wl,-wrap=pwrite -Wl,-wrap=writev -Wl,-wrap=PMPI_Allgather -Wl,-wrap=PMPI_Irecv -Wl,-wrap=PMPI_Waitall -o h5_collective_wrapped -I/usr/local/mpich-3.2.1-dbg/include -Wl,-rpath -Wl,/usr/local/mpich-3.2.1-dbg/lib -Wl,--enable-new-dtags /usr/local/mpich-3.2.1-dbg/lib/libmpi.a -lrt
-h5_collective_wrapped: h5_collective.c wrapper_fns2.c
+h5_collective_wrapped: h5_collective.c wrapper_fns.c
 	$(MPICC) -static -o$@ $^ $(LIB) \
 	-Wl,-wrap=write -Wl,-wrap=pwrite -Wl,-wrap=writev -Wl,-wrap=PMPI_Allgather -Wl,-wrap=PMPI_Irecv -Wl,-wrap=PMPI_Waitall
 
@@ -50,6 +50,9 @@ h5_collective_mpip: h5_collective.c
 UNWIND=/usr/local/libunwind-1.3
 io_wrappers.o: io_wrappers.c
 	gcc -c $< -I$(UNWIND)/include
+
+io_wrappers.so: io_wrappers.c
+	gcc -Wall -shared -fPIC $< -o $@ -ldl $(INC2)
 
 pc2orio2: pc2orio2.cc
 	$(MPICXX) $^ $(LIB) -lstdc++ -o $@

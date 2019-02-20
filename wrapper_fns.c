@@ -619,10 +619,3 @@ int MPI_Type_free(MPI_Datatype *datatype) {
   return PMPI_Type_free(datatype);
 }
 
-int MPI_Irecv(void *buf, int count, MPI_Datatype datatype, int source,
-              int tag, MPI_Comm comm, MPI_Request * request) {
-  int result;
-  result = PMPI_Irecv(buf, count, datatype, source, tag, comm, request);
-  printf("[%d] MPI_Irecv %d at %p\n", rank, count, buf);
-  return result;
-}
