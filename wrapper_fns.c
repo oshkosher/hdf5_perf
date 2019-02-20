@@ -1,5 +1,13 @@
 /* Wrappers of MPI functions to output debugging data. */
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <assert.h>
+#include <mpi.h>
+
+extern int rank, np;
+
 #ifdef CRAY_MPI
 #define CRAY_CONST const
 #else
@@ -39,7 +47,8 @@ static char *formatAmode(char buf[174], int amode) {
   assert(sizeof(amode_flags) / sizeof(amode_flags[0]) == 9);
   char *p = buf;
   *p = 0;
-  for (int i=0; i < 9; i++) {
+  int i;
+  for (i=0; i < 9; i++) {
     if (amode & amode_flags[i]) {
       if (p != buf) {
         strcat(p, " | ");
@@ -67,9 +76,9 @@ static void printMPIInfo(MPI_Info info, const char *prefix) {
   value = (char*) malloc(value_buf_len);
   assert(value);
 
-  int nkeys;
+  int keyno, nkeys;
   MPI_Info_get_nkeys(info, &nkeys);
-  for (int keyno=0; keyno < nkeys; keyno++) {
+  for (keyno=0; keyno < nkeys; keyno++) {
     MPI_Info_get_nthkey(info, keyno, key);
     int value_len, key_defined;
     MPI_Info_get_valuelen(info, key, &value_len, &key_defined);
@@ -608,4 +617,12 @@ int MPI_Type_free(MPI_Datatype *datatype) {
   }
   */
   return PMPI_Type_free(datatype);
+}
+
+int MPI_Irecv(void *buf, int count, MPI_Datatype datatype, int source,
+              int tag, MPI_Comm comm, MPI_Request * request) {
+  int result;
+  result = PMPI_Irecv(buf, count, datatype, source, tag, comm, request);
+  printf("[%d] MPI_Irecv %d at %p\n", rank, count, buf);
+  return result;
 }
