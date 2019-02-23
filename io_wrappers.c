@@ -222,7 +222,7 @@ void io_wrappers_init() {
     log = stdout;
   } else {
     if (rank == 0) {
-      fprintf(stderr, "writing io_wrappers.[0..%d].out\n", np-1);
+      printf("Writing io_wrappers.[0..%d].out\n", np-1);
     }
   }
 }
@@ -265,16 +265,13 @@ void io_wrappers_report(FILE *outf, double *io_time, double *comm_time) {
 
   if (rank == 0) {
     int i;
-    double total_time = 0;
     fprintf(outf, "cumulative counters\n");
     for (i=0; i < N_COUNTERS; i++) {
       if (all_counters[i]) {
         fprintf(outf, "  %s %d calls, %.6fs\n", counter_names[i],
                 all_counters[i], all_timers[i]);
-        total_time += all_timers[i];
       }
     }
-    fprintf(outf, "comm overhead: %.6f\n", total_time);
 
     *io_time = *comm_time = 0;
   
@@ -710,10 +707,12 @@ int MPI_File_write_at_all(MPI_File fh, MPI_Offset offset, const void *buf, int c
   static int (*fn)(MPI_File fh, MPI_Offset offset, const void *buf, int count, MPI_Datatype datatype, MPI_Status *status) = 0;
   lookup((void**)&fn, "MPI_File_write_at_all");
 
+  /*
   if (rank == 0) {
     struct FileStruct *f = (struct FileStruct*) fh;
     fprintf(stderr, "MPI_File fh cookie=%x fd=%d d_mem=%u d_miniosz=%u blksize=%ld filename=%s\n", f->cookie, f->fd_sys, f->d_mem, f->d_miniosz, f->blksize, f->filename);
   }
+  */
 
   int result;
   double start_time = getTime();
@@ -729,7 +728,7 @@ int MPI_File_write_at_all(MPI_File fh, MPI_Offset offset, const void *buf, int c
   fprintf(log, "%.6f file_write_at_all %.6fs\n", start_time, elapsed);
 
   if (rank == 0)
-    fprintf(stderr, "MPI_File_write_at_all report\n");
+    printf("MPI_File_write_at_all report\n");
   double io_time, comm_time;
   io_wrappers_report(stdout, &io_time, &comm_time);
 
