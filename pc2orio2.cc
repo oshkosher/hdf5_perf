@@ -32,6 +32,7 @@ using std::vector;
 
 
 int rank, np;   // rank & size of MPI_COMM_WORLD
+int node_count;
 double time0;
 
 
@@ -57,8 +58,8 @@ public:
       return false;
   }
 
-  int product() const {
-    return coord[0] * coord[1] * coord[2];
+  int64_t product() const {
+    return (int64_t) coord[0] * coord[1] * coord[2];
   }
 
   // format as a string in the form "x,y,z"
@@ -97,6 +98,7 @@ bool parseArgs(int argc, char **argv, string &filename,
                Triple &global_size, Triple &rank_splits,
                int &grid_count,
                int &stripe_count, int &stripe_len);
+int getNodeCount();
 void fail();
 void printHelp();
 bool setupData(Params &p, const Triple &rank_splits);
@@ -131,13 +133,14 @@ int main(int argc, char **argv) {
                  rank_splits, p.grid_count, p.stripe_count, p.stripe_len))
     fail();
 
+  node_count = getNodeCount();
   if (rank==0) {
     double mb = sizeof(double) * p.global_size.product() * p.grid_count
       / MBF;
-    printf("Write %dx(%s) grids (%.1f MiB), %d ranks (%s), "
+    printf("Write %dx(%s) grids (%.1f MiB), %d ranks (%s) on %d nodes, "
            "stripe_count=%d, stripe_len=%d\n",
            p.grid_count, p.global_size.str(),
-           mb, np, rank_splits.str(),
+           mb, np, rank_splits.str(), node_count,
            p.stripe_count, p.stripe_len);
   }
 
@@ -259,6 +262,20 @@ bool parseArgs(int argc, char **argv, string &filename,
   return true;
 }
 
+
+// borrowed from https://stackoverflow.com/questions/34115227/how-to-get-the-number-of-physical-machine-in-mpi
+int getNodeCount() {
+  int rank, is_rank0, nodes;
+  MPI_Comm shmcomm;
+
+  MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0,
+                      MPI_INFO_NULL, &shmcomm);
+  MPI_Comm_rank(shmcomm, &rank);
+  is_rank0 = (rank == 0) ? 1 : 0;
+  MPI_Allreduce(&is_rank0, &nodes, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Comm_free(&shmcomm);
+  return nodes;
+}
 
 void fail() {
   MPI_Finalize();
@@ -464,9 +481,9 @@ void writeHDF5File(const char *filename, Params &p) {
     if (rank == 0) {
       double size_mb;
       double write_mbps = bytes / (timer_write * MB);
-      printf("hdf5_write np=%d size_mb=%.3f stripe_count=%d stripe_len_mb=%d "
-             "write_sec=%.3f write_mbps=%.3f\n",
-             np, bytes / MBF, p.stripe_count, p.stripe_len / MB,
+      printf("hdf5_write np=%d nn=%d size_mb=%.3f stripe_count=%d "
+             "stripe_len_mb=%d write_sec=%.3f write_mbps=%.3f\n",
+             np, node_count, bytes / MBF, p.stripe_count, p.stripe_len / MB,
              timer_write, write_mbps);
     }
   }
@@ -577,9 +594,9 @@ void writeMPIIOFile(const char *filename, Params &p, bool use_vector_type) {
     if (rank == 0) {
       double size_mb;
       double write_mbps = bytes / (timer_write * MB);
-      printf("mpio_write np=%d size_mb=%.3f stripe_count=%d stripe_len_mb=%d "
-             "write_sec=%.3f write_mbps=%.3f\n",
-             np, bytes / MBF, p.stripe_count, p.stripe_len / MB,
+      printf("mpio_write np=%d nn=%d size_mb=%.3f stripe_count=%d "
+             "stripe_len_mb=%d write_sec=%.3f write_mbps=%.3f\n",
+             np, node_count, bytes / MBF, p.stripe_count, p.stripe_len / MB,
              timer_write, write_mbps);
     }
 
