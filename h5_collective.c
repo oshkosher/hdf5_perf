@@ -37,6 +37,7 @@ int rank, np;
    "module unload darshan" before compiling. */
 /* #include "wrapper_fns.c" */
 
+
 typedef struct {
   int rows, cols;  /* global size */
   int col_start, col_count;  /* this process' data */
