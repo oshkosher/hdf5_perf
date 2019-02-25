@@ -44,6 +44,7 @@ static FILE *log = 0;
 static char log_filename[30];
 static double t0 = 0;   // time 0, set in MPI_Init
 static int is_inside_mpi_file_open = 0;
+static int is_inside_write = 0;
 static const char *mpi_file_open_filename = 0;
 static int is_inside_MPI_File_write_at_all = 0;
 
@@ -76,6 +77,7 @@ enum {
   IDX_WRITE,
 
   IDX_ALLGATHER,
+  IDX_ALLREDUCE,
   IDX_WAITALL,
   IDX_RECV,
   IDX_IRECV,
@@ -91,6 +93,7 @@ enum {
 const char *counter_names[] = {
   "write",
   "allgather",
+  "allreduce",
   "waitall",
   "recv",
   "irecv",
@@ -99,7 +102,7 @@ const char *counter_names[] = {
   "alltoall",
 };
 
-#define N_COUNTERS 8
+#define N_COUNTERS 9
 
 static int counters[N_COUNTERS] = {0};
 static double timers[N_COUNTERS] = {0};
@@ -319,6 +322,49 @@ static int needModeArg(int flags) {
   return 0;
 }
 
+int open64(const char *pathname, int flags, ...) {
+  static int (*fn)(const char *pathname, int flags, ...) = 0;
+  lookup((void**)&fn, "open64");
+
+  int fd;
+
+  /* This can be called before the shared library for MPI is available,
+     and dlsym("MPI_Init") will fail, so avoid getting the pointers for all
+     the functions in one initializer function. */
+
+  double start_time = getTime();
+  mode_t mode = 0;
+  if (needModeArg(flags)) {
+    va_list args;
+    va_start(args, flags);
+    mode = va_arg(args, mode_t);
+    va_end(args);
+
+    fd = fn(pathname, flags, mode);
+  } else {
+    fd = fn(pathname, flags);
+  }
+  double end_time = getTime();
+
+  if (log) {
+    fprintf(log, "open64(%s, %03o, %03o)->%d\n", pathname, flags, (int)mode, fd);
+  }
+  
+  // looks like this file was opened for MPI_File_open
+  if (fd != -1
+      // && !strcmp(pathname, mpi_file_open_filename)
+      && is_inside_mpi_file_open) {
+    double elapsed = end_time - start_time;
+    fprintf(log, "%.6f open64 in MPI_File_open \"%s\" fd=%d %.6fs\n",
+            getTime() - elapsed, pathname, fd, elapsed);
+    setFileOpen(fd);
+  }
+
+  // fprintf(stderr, "open(%s)\n", pathname);
+
+  return fd;
+}
+
 
 int open(const char *pathname, int flags, ...) {
   static int (*open_orig_fn)(const char *pathname, int flags, ...) = 0;
@@ -331,8 +377,8 @@ int open(const char *pathname, int flags, ...) {
      the functions in one initializer function. */
 
   double start_time = getTime();
+  mode_t mode = 0;
   if (needModeArg(flags)) {
-    mode_t mode;
     va_list args;
     va_start(args, flags);
     mode = va_arg(args, mode_t);
@@ -343,19 +389,26 @@ int open(const char *pathname, int flags, ...) {
     fd = open_orig_fn(pathname, flags);
   }
   double end_time = getTime();
+
+  if (log) {
+    fprintf(log, "open(%s, %03o, %03o)->%d\n", pathname, flags, (int)mode, fd);
+  }
   
   // looks like this file was opened for MPI_File_open
   if (fd != -1
-      && is_inside_mpi_file_open
-      && !strcmp(pathname, mpi_file_open_filename)) {
+      // && !strcmp(pathname, mpi_file_open_filename)
+      && is_inside_mpi_file_open) {
     double elapsed = end_time - start_time;
     fprintf(log, "%.6f open in MPI_File_open \"%s\" fd=%d %.6fs\n",
             getTime() - elapsed, pathname, fd, elapsed);
     setFileOpen(fd);
   }
 
+  // fprintf(stderr, "open(%s)\n", pathname);
+
   return fd;
 }
+
 
 
 #if 0
@@ -419,11 +472,23 @@ ssize_t write(int fd, const void *buf, size_t count) {
   ssize_t result = write_orig_fn(fd, buf, count);
   double elapsed = getTime() - start_time;
   
+  /*
+  if (fd == 1) {
+    fprintf(stderr, "Write %d bytes to stdout\n", (int) count);
+  }
+  */
+  
+
+  // if (is_inside_MPI_File_write_at_all && !is_inside_write) {
+
   if (isFileOpen(fd) && is_inside_MPI_File_write_at_all) {
+    int prev_is_inside = is_inside_write;
+    is_inside_write = 1;
     fprintf(log, "%.6f write(fd=%d, count=%lu) %.6fs\n",
             start_time, fd, (unsigned long)count, elapsed);
     counters[IDX_WRITE]++;
     timers[IDX_WRITE] += elapsed;
+    is_inside_write = prev_is_inside;
     /* printBacktrace(); */
   }
 
@@ -431,19 +496,34 @@ ssize_t write(int fd, const void *buf, size_t count) {
 }
 
 
+/*
+int puts(const char *s)  {
+  static ssize_t (*fn)(const char *s) = 0;
+  lookup((void**)&fn, "puts");
+
+  fprintf(stderr, "puts\n");
+  return fn(s);
+}
+*/
+
 ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
-  static ssize_t (*pwrite_orig_fn)(int fd, const void *buf, size_t count, off_t offset) = 0;
-  lookup((void**)&pwrite_orig_fn, "pwrite");
+  static ssize_t (*fn)(int fd, const void *buf, size_t count, off_t offset) = 0;
+  lookup((void**)&fn, "pwrite");
   double start_time = getTime();
-  ssize_t result = pwrite_orig_fn(fd, buf, count, offset);
+  ssize_t result = fn(fd, buf, count, offset);
   double elapsed = getTime() - start_time;
   
+  // if (is_inside_MPI_File_write_at_all && !is_inside_write) {
+
   if (isFileOpen(fd) && is_inside_MPI_File_write_at_all) {
+    int prev_is_inside = is_inside_write;
+    is_inside_write = 1;
     fprintf(log, "%.6f pwrite(fd=%d, count=%lu, offset=%lu) %.6fs\n",
             start_time, fd, (unsigned long)count, (unsigned long)offset,
             elapsed);
     counters[IDX_WRITE]++;
     timers[IDX_WRITE] += elapsed;
+    is_inside_write = prev_is_inside;
     /* printBacktrace(); */
   }
 
@@ -469,12 +549,28 @@ ssize_t writev(int fd, const struct iovec *iov, int iovcnt) {
 
 
 int MPI_Init(int *argc, char ***argv) {
-  static int (*MPI_Init_orig_fn)(int *argc, char ***argv) = 0;
+  static int (*fn)(int *argc, char ***argv) = 0;
   int result;
 
-  lookup((void**)&MPI_Init_orig_fn, "MPI_Init");
+  lookup((void**)&fn, "MPI_Init");
 
-  result = MPI_Init_orig_fn(argc, argv);
+  result = fn(argc, argv);
+  /* fprintf(stderr, "wrapped MPI_Init\n"); */
+
+  io_wrappers_init();
+
+  return result;
+}
+
+
+int PMPI_Init(int *argc, char ***argv) {
+  static int (*fn)(int *argc, char ***argv) = 0;
+  int result;
+
+  lookup((void**)&fn, "PMPI_Init");
+
+  result = fn(argc, argv);
+  /* fprintf(stderr, "wrapped PMPI_Init\n"); */
 
   io_wrappers_init();
 
@@ -483,8 +579,8 @@ int MPI_Init(int *argc, char ***argv) {
 
 
 int MPI_Finalize() {
-  static int (*MPI_Finalize_orig_fn)(void) = 0;
-  lookup((void**)&MPI_Finalize_orig_fn, "MPI_Finalize");
+  static int (*fn)(void) = 0;
+  lookup((void**)&fn, "MPI_Finalize");
 
   if (open_files) {
     free(open_files);
@@ -492,7 +588,11 @@ int MPI_Finalize() {
     open_files_len = 0;
   }
 
-  return MPI_Finalize_orig_fn();
+  int result = fn();
+
+  /* fprintf(stderr, "wrapped MPI_Finalize\n"); */
+
+  return result;
 }
 
 
@@ -552,6 +652,26 @@ int PMPI_Allgather(const void *sendbuf, int sendcount, MPI_Datatype sendtype, vo
 }
 
 
+int PMPI_Allreduce(const void *sendbuf, void *recvbuf, int count,
+                   MPI_Datatype datatype, MPI_Op op, MPI_Comm comm) {
+  static int (*fn)(const void *sendbuf, void *recvbuf, int count, MPI_Datatype datatype, MPI_Op op, MPI_Comm comm) = 0;
+  lookup((void**)&fn, "PMPI_Allreduce");
+
+  int result;
+  double start_time = getTime();
+
+  result = fn(sendbuf, recvbuf, count, datatype, op, comm);
+
+  double elapsed = getTime() - start_time;
+  fprintf(log, "%.6f allreduce %.6fs\n", start_time, elapsed);
+  counters[IDX_ALLREDUCE]++;
+  timers[IDX_ALLREDUCE] += elapsed;
+
+  return result;
+}
+
+
+
 int PMPI_Waitall(int count, MPI_Request array_of_requests[], MPI_Status array_of_statuses[]) {
   static int (*fn)(int count, MPI_Request array_of_requests[], MPI_Status array_of_statuses[]) = 0;
   lookup((void**)&fn, "PMPI_Waitall");
@@ -599,7 +719,7 @@ int PMPI_Irecv(void *buf, int count, MPI_Datatype datatype, int source, int tag,
   result = fn(buf, count, datatype, source, tag, comm, request);
 
   double elapsed = getTime() - start_time;
-  fprintf(log, "%.6f irecv(count=%d, src=%d, tag=%d) %.6fs\n", start_time, count, source, tag, elapsed);
+  // fprintf(log, "%.6f irecv(count=%d, src=%d, tag=%d) %.6fs\n", start_time, count, source, tag, elapsed);
   counters[IDX_IRECV]++;
   timers[IDX_IRECV] += elapsed;
 
@@ -633,7 +753,7 @@ int PMPI_Isend(const void *buf, int count, MPI_Datatype datatype, int dest, int 
   result = fn(buf, count, datatype, dest, tag, comm, request);
 
   double elapsed = getTime() - start_time;
-  fprintf(log, "%.6f isend(count=%d, dest=%d, tag=%d) %.6fs\n", start_time, count, dest, tag, elapsed);
+  // fprintf(log, "%.6f isend(count=%d, dest=%d, tag=%d) %.6fs\n", start_time, count, dest, tag, elapsed);
   counters[IDX_ISEND]++;
   timers[IDX_ISEND] += elapsed;
 
@@ -733,8 +853,8 @@ int MPI_File_write_at_all(MPI_File fh, MPI_Offset offset, const void *buf, int c
   io_wrappers_report(stdout, &io_time, &comm_time);
 
   if (rank == 0) {
-    printf("MPI_File_write_at_all total %.6fs, io %.6fs (%.1f%%), "
-           "comm %.6fs (%.1f%%)\n", elapsed,
+    printf("MPI_File_write_at_all total %.6fs=%.6f node*sec, io %.6fs (%.1f%%), "
+           "comm %.6fs (%.1f%%)\n", elapsed, elapsed*np,
            io_time, elapsed == 0 ? 0 : 100.0 * io_time / (elapsed * np),
            comm_time, elapsed == 0 ? 0 : 100.0 * comm_time / (elapsed * np));
   }

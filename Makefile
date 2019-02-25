@@ -8,7 +8,8 @@ OPT=-g -O0
 # Blue Waters
 ifeq "$(shell hostname | head -c 8)" "h2ologin"
 
-HDF_HOME=/u/sciteam/karrels/Install/hdf5-1.10.4-cray
+# HDF_HOME=/u/sciteam/karrels/Install/hdf5-1.10.4-cray
+HDF_HOME=/opt/cray/hdf5-parallel/1.10.0/GNU/5.1
 LIB=-L$(HDF_HOME)/lib -lhdf5 -Wl,-rpath -Wl,$(HDF_HOME)/lib
 INC=-I$(HDF_HOME)/include
 CC=cc $(INC) $(OPT)
@@ -36,7 +37,7 @@ endif
 all: $(EXECS)
 
 h5_collective: h5_collective.c
-	$(MPICC) $< $(LIB) -ldl -o $@
+	$(MPICC) -dynamic $< $(LIB) -ldl -o $@
 
 # gcc -g3 -O0 -pthread -I/usr/local/hdf5/include h5_collective.c wrapper_fns2.c -L/usr/local/hdf5/lib -lhdf5 -Wl,-rpath -Wl,/usr/local/hdf5/lib -Wl,-wrap=write -Wl,-wrap=pwrite -Wl,-wrap=writev -Wl,-wrap=PMPI_Allgather -Wl,-wrap=PMPI_Irecv -Wl,-wrap=PMPI_Waitall -o h5_collective_wrapped -I/usr/local/mpich-3.2.1-dbg/include -Wl,-rpath -Wl,/usr/local/mpich-3.2.1-dbg/lib -Wl,--enable-new-dtags /usr/local/mpich-3.2.1-dbg/lib/libmpi.a -lrt
 h5_collective_wrapped: h5_collective.c wrapper_fns.c
@@ -52,7 +53,7 @@ io_wrappers.o: io_wrappers.c
 	gcc -c $< -I$(UNWIND)/include
 
 io_wrappers.so: io_wrappers.c
-	gcc -Wall -shared -fPIC $< -o $@ -ldl $(INC2)
+	$(MPICC) -shared -fPIC $< -o $@ -ldl $(INC2)
 
 
 run: io_wrappers.so h5_collective
