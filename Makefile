@@ -15,20 +15,24 @@ INC=-I$(HDF_HOME)/include
 CC=cc $(INC) $(OPT)
 MPICC=cc -DCRAY_MPI $(OPT) $(INC)
 MPICXX=CC -DCRAY_MPI $(OPT) $(INC)
+LINK_DYNAMIC=-dynamic
 DARSHAN_RUNTIME=
 
 else
 
 HDF_HOME=/usr/local/hdf5
-MPI_HOME=/usr/local/mpich-3.2.1-dbg
-INC=-I$(HDF_HOME)/include
+MPI_HOME=/usr/local/mpich-3.2.1
+MPE_HOME=/usr/local/mpe
+INC=-I$(HDF_HOME)/include -I$(MPE_HOME)/include
 INC2=-I$(HDF_HOME)/include -I$(MPI_HOME)/include
-LIB=-L$(HDF_HOME)/lib -lhdf5 -Wl,-rpath -Wl,$(HDF_HOME)/lib
+LIB=-L$(HDF_HOME)/lib -lhdf5 -Wl,-rpath -Wl,$(HDF_HOME)/lib \
+  -L$(MPE_HOME)/lib -Wl,-rpath -Wl,$(MPE_HOME)/lib
 LIB2=-L$(HDF_HOME)/lib -L$(MPI_HOME)/lib -lhdf5 -lmpi -Wl,-rpath -Wl,$(HDF_HOME)/lib
 LIBDIRS=-L$(HDF_HOME)/lib -L$(MPI_HOME)/lib
 CC=gcc $(OPT) $(INC)
 MPICC=$(MPI_HOME)/bin/mpicc $(OPT) $(INC)
 MPICXX=$(MPI_HOME)/bin/mpicxx $(OPT) $(INC)
+LINK_DYNAMIC=
 # DARSHAN_LOGFILE=/tmp/io.darshan
 # DARSHAN_RUNTIME=DXT_ENABLE_IO_TRACE=4 LD_PRELOAD=/usr/local/darshan3-runtime/lib/libdarshan.so DARSHAN_LOGFILE=$(DARSHAN_LOGFILE)
 
@@ -36,8 +40,10 @@ endif
 
 all: $(EXECS)
 
+# Blue Waters builds a static executable by default, but we need dynamic linking
+# for LD_PRELOAD to work. On regular Linux, -dynamic is not recognized.
 h5_collective: h5_collective.c
-	$(MPICC) -dynamic $< $(LIB) -ldl -o $@
+	$(MPICC) $(INC) $(LINK_DYNAMIC) $< $(LIB) -ldl -o $@
 
 # gcc -g3 -O0 -pthread -I/usr/local/hdf5/include h5_collective.c wrapper_fns2.c -L/usr/local/hdf5/lib -lhdf5 -Wl,-rpath -Wl,/usr/local/hdf5/lib -Wl,-wrap=write -Wl,-wrap=pwrite -Wl,-wrap=writev -Wl,-wrap=PMPI_Allgather -Wl,-wrap=PMPI_Irecv -Wl,-wrap=PMPI_Waitall -o h5_collective_wrapped -I/usr/local/mpich-3.2.1-dbg/include -Wl,-rpath -Wl,/usr/local/mpich-3.2.1-dbg/lib -Wl,--enable-new-dtags /usr/local/mpich-3.2.1-dbg/lib/libmpi.a -lrt
 h5_collective_wrapped: h5_collective.c wrapper_fns.c
@@ -53,11 +59,13 @@ io_wrappers.o: io_wrappers.c
 	gcc -c $< -I$(UNWIND)/include
 
 io_wrappers.so: io_wrappers.c
-	$(MPICC) -shared -fPIC $< -o $@ -ldl $(INC2)
+	$(MPICC) -shared -fPIC $< -o $@ -ldl $(MPE_HOME)/lib/libmpe.a $(INC2)
 
 
 run: io_wrappers.so h5_collective
-	LD_PRELOAD=./io_wrappers.so mpirun -np 2 ./h5_collective /tmp/foo 1000 1000
+	LD_PRELOAD=./io_wrappers.so mpirun -np 8 ./h5_collective /tmp/foo 10000 1000
+	 clog2TOslog2 io_wrappers.clog2
+	# jumpshot io_wrappers.slog2
 
 
 pc2orio2: pc2orio2.cc

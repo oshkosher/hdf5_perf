@@ -13,3 +13,5 @@ pc2orio2
 *.trc
 *.edf
 *.mpiP
+*.clog2
+*.slog2
