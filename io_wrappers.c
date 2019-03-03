@@ -594,8 +594,8 @@ ssize_t write(int fd, const void *buf, size_t count) {
 
     int prev_is_inside = is_inside_write;
     is_inside_write = 1;
-    fprintf(log, "%.6f write(fd=%d, count=%lu) %.6fs\n",
-            start_time, fd, (unsigned long)count, elapsed);
+    /* fprintf(log, "%.6f write(fd=%d, count=%lu) %.6fs\n",
+       start_time, fd, (unsigned long)count, elapsed); */
     counters[IDX_WRITE]++;
     timers[IDX_WRITE] += elapsed;
     is_inside_write = prev_is_inside;
@@ -626,9 +626,9 @@ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
 
     int prev_is_inside = is_inside_write;
     is_inside_write = 1;
-    fprintf(log, "%.6f pwrite(fd=%d, count=%lu, offset=%lu) %.6fs\n",
+    /* fprintf(log, "%.6f pwrite(fd=%d, count=%lu, offset=%lu) %.6fs\n",
             start_time, fd, (unsigned long)count, (unsigned long)offset,
-            elapsed);
+            elapsed); */
     counters[IDX_WRITE]++;
     timers[IDX_WRITE] += elapsed;
     is_inside_write = prev_is_inside;
@@ -728,7 +728,7 @@ int PMPI_Allgather(const void *sendbuf, int sendcount, MPI_Datatype sendtype, vo
 
   MPE_Log_event(log_ids[STATE_ALLGATHER+1], 0, NULL);
   double elapsed = getTime() - start_time;
-  fprintf(log, "%.6f allgather %.6fs\n", start_time, elapsed);
+  // fprintf(log, "%.6f allgather %.6fs\n", start_time, elapsed);
   counters[IDX_ALLGATHER]++;
   timers[IDX_ALLGATHER] += elapsed;
 
@@ -752,7 +752,7 @@ int PMPI_Allreduce(const void *sendbuf, void *recvbuf, int count,
     MPE_Log_event(log_ids[STATE_ALLREDUCE+1], 0, NULL);
   double elapsed = getTime() - start_time;
   // fprintf(stderr, "[%d] %.6f allreduce %.6fs\n", rank, start_time, elapsed);
-  fprintf(log, "%.6f allreduce %.6fs\n", start_time, elapsed);
+  // fprintf(log, "%.6f allreduce %.6fs\n", start_time, elapsed);
   counters[IDX_ALLREDUCE]++;
   timers[IDX_ALLREDUCE] += elapsed;
 
@@ -773,7 +773,7 @@ int PMPI_Waitall(int count, MPI_Request array_of_requests[], MPI_Status array_of
 
   MPE_Log_event(log_ids[STATE_WAITALL+1], 0, NULL);
   double elapsed = getTime() - start_time;
-  fprintf(log, "%.6f waitall %.6fs\n", start_time, elapsed);
+  // fprintf(log, "%.6f waitall %.6fs\n", start_time, elapsed);
   counters[IDX_WAITALL]++;
   timers[IDX_WAITALL] += elapsed;
 
@@ -792,7 +792,7 @@ int PMPI_Recv(void *buf, int count, MPI_Datatype datatype, int source, int tag,
   result = fn(buf, count, datatype, source, tag, comm, status);
 
   double elapsed = getTime() - start_time;
-  fprintf(log, "%.6f recv(count=%d, src=%d) %.6fs\n", start_time, count, source, elapsed);
+  // fprintf(log, "%.6f recv(count=%d, src=%d) %.6fs\n", start_time, count, source, elapsed);
   counters[IDX_RECV]++;
   timers[IDX_RECV] += elapsed;
 
@@ -829,7 +829,7 @@ int PMPI_Send(const void *buf, int count, MPI_Datatype datatype, int dest, int t
   result = fn(buf, count, datatype, dest, tag, comm);
 
   double elapsed = getTime() - start_time;
-  fprintf(log, "%.6f send %.6fs\n", start_time, elapsed);
+  // fprintf(log, "%.6f send %.6fs\n", start_time, elapsed);
   counters[IDX_SEND]++;
   timers[IDX_SEND] += elapsed;
 
@@ -867,7 +867,7 @@ int PMPI_Alltoall(const void *sendbuf, int sendcount, MPI_Datatype sendtype, voi
 
   MPE_Log_event(log_ids[STATE_ALLTOALL+1], 0, NULL);
   double elapsed = getTime() - start_time;
-  fprintf(log, "%.6f alltoall %.6fs\n", start_time, elapsed);
+  // fprintf(log, "%.6f alltoall %.6fs\n", start_time, elapsed);
   counters[IDX_ALLTOALL]++;
   timers[IDX_ALLTOALL] += elapsed;
 
@@ -949,7 +949,7 @@ int MPI_File_write_at_all(MPI_File fh, MPI_Offset offset, const void *buf, int c
   is_inside_MPI_File_write_at_all = 0;
 
   double elapsed = getTime() - start_time;
-  fprintf(log, "%.6f file_write_at_all %.6fs\n", start_time, elapsed);
+  fprintf(log, "%.6f file_write_at_all %.6fs write(%d calls, %.6fs)\n", start_time, elapsed, counters[IDX_WRITE], timers[IDX_WRITE]);
 
   if (rank == 0)
     printf("MPI_File_write_at_all report\n");

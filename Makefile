@@ -1,7 +1,8 @@
 default: io_wrappers.so h5_collective
 
 EXECS=h5_collective pc2orio2 h5_collective_mpip h5_collective_wrapped io_wrappers.so
-OPT=-g -O0
+# OPT=-g -O0
+OPT=-O3
 
 # darshan-parser-nonzero /tmp/io.darshan | grep POSIX_ACCESS
 
@@ -10,8 +11,9 @@ ifeq "$(shell hostname | head -c 8)" "h2ologin"
 
 # HDF_HOME=/u/sciteam/karrels/Install/hdf5-1.10.4-cray
 HDF_HOME=/opt/cray/hdf5-parallel/1.10.0/GNU/5.1
+MPE_HOME=/u/sciteam/karrels/Install/mpe
 LIB=-L$(HDF_HOME)/lib -lhdf5 -Wl,-rpath -Wl,$(HDF_HOME)/lib
-INC=-I$(HDF_HOME)/include
+INC=-I$(HDF_HOME)/include -I$(MPE_HOME)/include
 CC=cc $(INC) $(OPT)
 MPICC=cc -DCRAY_MPI $(OPT) $(INC)
 MPICXX=CC -DCRAY_MPI $(OPT) $(INC)
