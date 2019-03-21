@@ -9,7 +9,8 @@ extern "C" {
 #endif
 
 void io_wrappers_reset();
-void io_wrappers_report(FILE *outf, double *io_time, double *comm_time);
+void io_wrappers_report(FILE *outf);
+
 
 #ifdef __cplusplus
 }

@@ -52,14 +52,17 @@ static double t0 = 0;   // time 0, set in MPI_Init
 static int is_inside_mpi_file_open = 0;
 static int is_inside_write = 0;
 static const char *mpi_file_open_filename = 0;
-static int is_inside_MPI_File_write_at_all = 0;
+static int is_inside_mpi_file_write = 0;
+static int is_inside_mpi_file_read = 0;
 
 
 static int np = 0, rank = -1;
 
-/* put io counters (read/write/open/stat) first, then MPI calls */
+/* put io counters (read/write/open/stat) first, then MPI calls, to quickly
+   distinguish between acutal IO and communications overhead */
 enum {
   IDX_WRITE,
+  IDX_READ,
 
   IDX_ALLGATHER,
   IDX_ALLREDUCE,
@@ -69,14 +72,21 @@ enum {
   IDX_SEND,
   IDX_ISEND,
   IDX_ALLTOALL,
+  IDX_BARRIER,
+  IDX_BCAST,
+
+  IDX_COLL_WRITE,
+  IDX_COLL_READ,
 
   IDX_END
 };
 
 #define IDX_FIRST_COMM IDX_ALLGATHER
+#define IDX_FIRST_COLL_IO IDX_COLL_WRITE
 
 const char *counter_names[] = {
   "write",
+  "read",
   "allgather",
   "allreduce",
   "waitall",
@@ -85,19 +95,29 @@ const char *counter_names[] = {
   "send",
   "isend",
   "alltoall",
+  "barrier",
+  "broadcast",
+  "collective write",
+  "collective read"
 };
 
-#define N_COUNTERS 9
+#define N_COUNTERS IDX_END
 
-static int counters[N_COUNTERS] = {0};
-static double timers[N_COUNTERS] = {0};
+static int counters[N_COUNTERS];
+static double timers[N_COUNTERS];
+
+typedef struct {
+  int counter_idx;
+  int count;
+  double timer;
+} Counter;
 
 
 
 void io_wrappers_init();
 void io_wrappers_reset(); /* reset counters */
   /* collective routine; gather & print data */
-void io_wrappers_report(FILE *outf, double *io_time, double *comm_time);
+void io_wrappers_report(FILE *outf);
 void io_wrappers_end();  /* deallocate */
 // static void printBacktrace();
 
@@ -120,9 +140,11 @@ enum LogEventIds {
   STATE_ADIOI_HEAP_MERGE = 18,
   STATE_ADIO_READCONTIG = 20,
   STATE_TYPE_COMMIT = 22,
-
-  EVENT_ADIOI_MALLOC = 24,
-  EVENT_ADIOI_FREE,
+  STATE_ADIO_LUSTRE_FILL_SEND_BUF = 24,
+  STATE_COLL_READ = 26,
+  STATE_READ = 28,
+  STATE_BARRIER = 30,
+  STATE_BCAST = 32,
   
   LOG_EVENT_ID_END
 };
@@ -221,7 +243,6 @@ static void printBacktrace() {
 void io_wrappers_init() {
   if (is_init) return;
   
-  assert(N_COUNTERS == IDX_END);
   assert(sizeof counter_names == sizeof(char*) * N_COUNTERS);
   assert(sizeof log_ids == sizeof(int) * (LOG_EVENT_ID_END + 2));
 
@@ -251,78 +272,132 @@ void io_wrappers_init() {
 
 /* reset counters */
 void io_wrappers_reset() {
-  /*
-  timer_write = 0;
-  count_write = 0;
-  timer_Allgather = 0;
-  count_Allgather = 0;
-  timer_Waitall = 0;
-  count_Waitall = 0;
-  timer_Recv = 0;
-  count_Recv = 0;
-  timer_Irecv = 0;
-  count_Irecv = 0;
-  timer_Send = 0;
-  count_Send = 0;
-  timer_Isend = 0;
-  count_Isend = 0;
-  timer_Alltoall = 0;
-  count_Alltoall = 0;
-  */
   memset(counters, 0, sizeof(int) * N_COUNTERS);
   memset(timers, 0, sizeof(double) * N_COUNTERS);
+  /* memset(counters, 0, sizeof(Counter) * N_COUNTERS); */
 }  
 
 
+static int compareCounter(const void *av, const void *bv) {
+  Counter *a = (Counter*) av;
+  Counter *b = (Counter*) bv;
+
+  if (a->count > 0) {
+    if (b->count > 0) {
+      /* both are nonzero, order by decreasing timer */
+      if (a->timer < b->timer) {
+        return 1;
+      } else {
+        return -1;
+      }
+    } else {
+      /* only a is nonzero */
+      return -1;
+    }
+  } else {
+    if (b->count > 0) {
+      /* only b is nonzero */
+      return 1;
+    } else {
+      /* both are zero */
+      return 0;
+    }
+  }
+}
+
+
+/* Fill 'ordered' with the values from counters[] and timers[], ordered
+   by decreasing timer value. */
+static void orderCounters(Counter ordered[N_COUNTERS],
+                          const int counters[N_COUNTERS],
+                          const double timers[N_COUNTERS]) {
+  int i;
+  /* copy counters and timers to one array of structures */
+  for (i=0; i < N_COUNTERS; i++) {
+    ordered[i].counter_idx = i;
+    if (i < IDX_FIRST_COLL_IO) {
+      ordered[i].count = counters[i];
+      ordered[i].timer = timers[i];
+    } else {
+      /* don't count the time in collective io */
+      ordered[i].count = 0;
+      ordered[i].timer = 0;
+    }
+  }
+  qsort(ordered, N_COUNTERS, sizeof(Counter), compareCounter);
+}
+
+
 /* collective routine; gather & print data */
-void io_wrappers_report(FILE *outf, double *io_time, double *comm_time) {
+void io_wrappers_report(FILE *outf) {
+  int zero_counters[N_COUNTERS] = {0};
+  double zero_timers[N_COUNTERS] = {0};
+
   int all_counters[N_COUNTERS];
   double all_timers[N_COUNTERS];
 
-  MPI_Reduce(counters, all_counters, N_COUNTERS, MPI_INT, MPI_SUM, 0,
-             MPI_COMM_WORLD);
-  MPI_Reduce(timers, all_timers, N_COUNTERS, MPI_DOUBLE, MPI_SUM, 0,
-             MPI_COMM_WORLD);
+  int do_io, is_io;
+
+  /* check whether this processes was actually doing I/O or just passing
+     data to/from an IO processe */
+  is_io = counters[IDX_WRITE] > 0 || counters[IDX_READ] > 0;
+
+  double coll_io_time = timers[IDX_COLL_WRITE] + timers[IDX_COLL_READ];
 
   if (rank == 0) {
-    int i;
-    fprintf(outf, "cumulative counters\n");
-    for (i=0; i < N_COUNTERS; i++) {
-      if (all_counters[i]) {
-        fprintf(outf, "  %s %d calls, %.6fs\n", counter_names[i],
-                all_counters[i], all_timers[i]);
+    const char *fn_name;
+    if (counters[IDX_COLL_WRITE]) { 
+      if (counters[IDX_COLL_READ]) {
+        fn_name = "MPI_File_write and MPI_File_read";
+      } else {
+        fn_name = "MPI_File_write";
       }
+    } else {
+      fn_name = "MPI_File_read";
     }
-
-    *io_time = *comm_time = 0;
-  
-    for (i=0; i < IDX_FIRST_COMM; i++)
-      *io_time += all_timers[i];
-
-    for (i=IDX_FIRST_COMM; i < N_COUNTERS; i++)
-      *comm_time += all_timers[i];
+    fprintf(outf, "%s time %.6fs\n", fn_name, coll_io_time);
   }
-   
-  /*
-  if (count_write)
-    fprintf(outf, "write() %d calls, %.6fs\n", count_write, timer_write);
-  if (count_Allgather)
-    fprintf(outf, "Allgather() %d calls, %.6fs\n", count_Allgather, timer_Allgather);
-  if (count_Waitall)
-    fprintf(outf, "Waitall() %d calls, %.6fs\n", count_Waitall, timer_Waitall);
-  if (count_Recv)
-    fprintf(outf, "Recv() %d calls, %.6fs\n", count_Recv, timer_Recv);
-  if (count_Irecv)
-    fprintf(outf, "Irecv() %d calls, %.6fs\n", count_Irecv, timer_Irecv);
-  if (count_Send)
-    fprintf(outf, "Send() %d calls, %.6fs\n", count_Send, timer_Send);
-  if (count_Isend)
-    fprintf(outf, "Isend() %d calls, %.6fs\n", count_Isend, timer_Isend);
-  if (count_Alltoall)
-    fprintf(outf, "Alltoall() %d calls, %.6fs\n", count_Alltoall, timer_Alltoall);
-  
-  fprintf(outf, "comm overhead: %.6f\n", timer_Allgather + timer_Waitall + timer_Recv + timer_Irecv + timer_Send + timer_Isend + timer_Alltoall);
-  */
+
+  // first print data from ranks that write, then ranks that don't
+  for (int do_io=1; do_io >= 0; do_io--) {
+    int do_me = is_io == do_io;
+    int *counter_array = do_me ? counters : zero_counters;
+    double *timer_array = do_me ? timers : zero_timers;
+    int n_active;
+    
+    MPI_Reduce(&do_me, &n_active, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(counter_array, all_counters, N_COUNTERS, MPI_INT, MPI_SUM, 0,
+               MPI_COMM_WORLD);
+    MPI_Reduce(timer_array, all_timers, N_COUNTERS, MPI_DOUBLE, MPI_SUM, 0,
+               MPI_COMM_WORLD);
+
+    double coll_io_time = all_timers[IDX_COLL_WRITE]
+      + all_timers[IDX_COLL_READ];
+
+    if (rank == 0) {
+      Counter ordered_counters[N_COUNTERS];
+      orderCounters(ordered_counters, all_counters, all_timers);
+
+      fprintf(outf, "%d %s processes, total time %.6fs\n", n_active,
+              do_io ? "io" : "non-io", coll_io_time);
+      
+      // double proc_sec = n_active * coll_io_time;
+
+      Counter *c;
+      double cumulative_pct = 0;
+      for (c = ordered_counters; c != ordered_counters + N_COUNTERS; c++) {
+        if (c->count) {
+          double pct_time = 100.0 * c->timer / coll_io_time;
+          cumulative_pct += pct_time;
+          fprintf(outf, "  %s %.2f%% [%.2f%%] (%d call%s, %.6fs)\n",
+                  counter_names[c->counter_idx], pct_time, cumulative_pct,
+                  c->count, c->count==1 ? "" : "s", c->timer);
+                  
+        }
+      }
+
+    }
+  }   
 }
 
 
@@ -336,14 +411,27 @@ void io_wrappers_end() {
 #ifdef MPE_LOG_OK
 // initialize logging and define states
 static void init_mpe_logging() {
+  int i;
   MPE_Init_log();
   // printf("[%d] MPE_Init_log done\n", rank);
+
+  /*
+  for (i = 0; i < LOG_EVENT_ID_END; i += 2) {
+    MPE_Log_get_state_eventIDs(log_ids + i, log_ids + i + 1);
+  }
+  */
 
   MPE_Log_get_state_eventIDs(log_ids + STATE_COLL_WRITE,
                              log_ids + STATE_COLL_WRITE + 1);
 
+  MPE_Log_get_state_eventIDs(log_ids + STATE_COLL_READ,
+                             log_ids + STATE_COLL_READ + 1);
+
   MPE_Log_get_state_eventIDs(log_ids + STATE_WRITE,
                              log_ids + STATE_WRITE + 1);
+
+  MPE_Log_get_state_eventIDs(log_ids + STATE_READ,
+                             log_ids + STATE_READ + 1);
 
   MPE_Log_get_state_eventIDs(log_ids + STATE_WAITALL,
                              log_ids + STATE_WAITALL + 1);
@@ -375,22 +463,36 @@ static void init_mpe_logging() {
   MPE_Log_get_state_eventIDs(log_ids + STATE_TYPE_COMMIT,
                              log_ids + STATE_TYPE_COMMIT + 1);
 
-  MPE_Log_get_solo_eventID(log_ids + EVENT_ADIOI_MALLOC);
-  MPE_Log_get_solo_eventID(log_ids + EVENT_ADIOI_FREE);
+  MPE_Log_get_state_eventIDs(log_ids + STATE_ADIO_LUSTRE_FILL_SEND_BUF,
+                             log_ids + STATE_ADIO_LUSTRE_FILL_SEND_BUF + 1);
+
+  MPE_Log_get_state_eventIDs(log_ids + STATE_BARRIER,
+                             log_ids + STATE_BARRIER + 1);
+
+  MPE_Log_get_state_eventIDs(log_ids + STATE_BCAST,
+                             log_ids + STATE_BCAST + 1);
 
   if (rank == 0) {
     MPE_Describe_state(log_ids[STATE_COLL_WRITE], log_ids[STATE_COLL_WRITE+1],
                        "Collective write", "blue");
+    MPE_Describe_state(log_ids[STATE_COLL_READ], log_ids[STATE_COLL_READ+1],
+                       "Collective read", "DarkSeaGreen");
     MPE_Describe_state(log_ids[STATE_WRITE], log_ids[STATE_WRITE+1],
                        "Write", "yellow");
+    MPE_Describe_state(log_ids[STATE_READ], log_ids[STATE_READ+1],
+                       "Read", "orange");
     MPE_Describe_state(log_ids[STATE_WAITALL], log_ids[STATE_WAITALL+1],
                        "Wait all", "green");
     MPE_Describe_state(log_ids[STATE_ALLTOALL], log_ids[STATE_ALLTOALL+1],
-                       "All to all", "red");
+                       "All to all", "indian red");
     MPE_Describe_state(log_ids[STATE_ALLREDUCE], log_ids[STATE_ALLREDUCE+1],
                        "All reduce", "orange");
     MPE_Describe_state(log_ids[STATE_ALLGATHER], log_ids[STATE_ALLGATHER+1],
                        "All gather", "purple");
+    MPE_Describe_state(log_ids[STATE_BARRIER], log_ids[STATE_BARRIER+1],
+                       "Barrier", "red");
+    MPE_Describe_state(log_ids[STATE_BCAST], log_ids[STATE_BCAST+1],
+                       "Broadcast", "orchid2");
     MPE_Describe_state(log_ids[STATE_IRECV], log_ids[STATE_IRECV+1],
                        "Irecv", "white");
     MPE_Describe_state(log_ids[STATE_ISEND], log_ids[STATE_ISEND+1],
@@ -408,14 +510,10 @@ static void init_mpe_logging() {
                        log_ids[STATE_TYPE_COMMIT+1],
                        "Type commit", "ForestGreen");
 
-    MPE_Describe_event(log_ids[EVENT_ADIOI_MALLOC], "ADIOI_Malloc", "green");
-    MPE_Describe_event(log_ids[EVENT_ADIOI_FREE], "ADIOI_Free", "red");
-    /*
-    MPE_Describe_event(log_ids[EVENT_ADIOI_TYPE_CREATE_HINDEXED_X], "ADIOI_Type_create_hindexed_x", "orange");
-    MPE_Describe_event(log_ids[EVENT_ADIOI_HEAP_MERGE], "ADIOI_Heap_merge", "yellow");
-    MPE_Describe_event(log_ids[EVENT_ADIO_READCONTIG], "ADIO_ReadContig", "green");
-    MPE_Describe_event(log_ids[EVENT_TYPE_COMMIT], "Type commit", "blue");
-    */
+    MPE_Describe_state(log_ids[STATE_ADIO_LUSTRE_FILL_SEND_BUF],
+                       log_ids[STATE_ADIO_LUSTRE_FILL_SEND_BUF+1],
+                       "ADIO Lustre fill send buf", "SteelBlue4");
+
   }
   
 }
@@ -578,7 +676,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
   static ssize_t (*fn)(int fd, const void *buf, size_t count) = 0;
   lookup((void**)&fn, "write");
 
-  if (!isFileOpen(fd) || !is_inside_MPI_File_write_at_all) {
+  if (!isFileOpen(fd) || !is_inside_mpi_file_write) {
 
     return fn(fd, buf, count);
 
@@ -610,7 +708,7 @@ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
   static ssize_t (*fn)(int fd, const void *buf, size_t count, off_t offset) = 0;
   lookup((void**)&fn, "pwrite");
   
-  if (!isFileOpen(fd) || !is_inside_MPI_File_write_at_all) {
+  if (!isFileOpen(fd) || !is_inside_mpi_file_write) {
 
     return fn(fd, buf, count, offset);
 
@@ -633,6 +731,60 @@ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
     timers[IDX_WRITE] += elapsed;
     is_inside_write = prev_is_inside;
     /* printBacktrace(); */
+
+    return result;
+
+  }
+}
+
+
+ssize_t read(int fd, void *buf, size_t count) {
+  static ssize_t (*fn)(int fd, void *buf, size_t count) = 0;
+  lookup((void**)&fn, "read");
+  
+  if (!isFileOpen(fd) || !is_inside_mpi_file_read) {
+
+    return fn(fd, buf, count);
+
+  } else {
+  
+    double start_time = getTime();
+    MPE_Log_event(log_ids[STATE_READ], 0, NULL);
+
+    ssize_t result = fn(fd, buf, count);
+
+    MPE_Log_event(log_ids[STATE_READ+1], 0, NULL);
+    double elapsed = getTime() - start_time;
+
+    counters[IDX_READ]++;
+    timers[IDX_READ] += elapsed;
+
+    return result;
+
+  }
+}
+
+
+ssize_t pread(int fd, void *buf, size_t count, off_t offset) {
+  static ssize_t (*fn)(int fd, void *buf, size_t count, off_t offset) = 0;
+  lookup((void**)&fn, "pread");
+  
+  if (!isFileOpen(fd) || !is_inside_mpi_file_read) {
+
+    return fn(fd, buf, count, offset);
+
+  } else {
+  
+    double start_time = getTime();
+    MPE_Log_event(log_ids[STATE_READ], 0, NULL);
+
+    ssize_t result = fn(fd, buf, count, offset);
+
+    MPE_Log_event(log_ids[STATE_READ+1], 0, NULL);
+    double elapsed = getTime() - start_time;
+
+    counters[IDX_READ]++;
+    timers[IDX_READ] += elapsed;
 
     return result;
 
@@ -875,6 +1027,57 @@ int PMPI_Alltoall(const void *sendbuf, int sendcount, MPI_Datatype sendtype, voi
 }
 
 
+int PMPI_Barrier(MPI_Comm comm) {
+  static int (*fn)(MPI_Comm comm) = 0;
+  lookup((void**)&fn, "PMPI_Barrier");
+
+  int result;
+
+  /* barrier seems to be called inside MPE_Finish_log, so logging inside
+     that causes hangs */
+  if (!is_init)
+    return fn(comm);
+
+  double start_time = getTime();
+  MPE_Log_event(log_ids[STATE_BARRIER], 0, NULL);
+
+  result = fn(comm);
+
+  MPE_Log_event(log_ids[STATE_BARRIER+1], 0, NULL);
+  double elapsed = getTime() - start_time;
+  fprintf(log, "%.6f barrier %.6fs\n", start_time, elapsed);
+  counters[IDX_BARRIER]++;
+  timers[IDX_BARRIER] += elapsed;
+
+  return result;
+}
+
+
+int PMPI_Bcast(void *buffer, int count, MPI_Datatype datatype, int root, MPI_Comm comm) {
+  static int (*fn)(void *buffer, int count, MPI_Datatype datatype, int root, MPI_Comm comm) = 0;
+  lookup((void**)&fn, "PMPI_Bcast");
+
+  int result;
+
+  if (!is_init)
+    return fn(buffer, count, datatype, root, comm);
+
+  double start_time = getTime();
+  MPE_Log_event(log_ids[STATE_BCAST], 0, NULL);
+
+  result = fn(buffer, count, datatype, root, comm);
+
+  MPE_Log_event(log_ids[STATE_BCAST+1], 0, NULL);
+  double elapsed = getTime() - start_time;
+  fprintf(log, "%.6f bcast %.6fs\n", start_time, elapsed);
+  counters[IDX_BCAST]++;
+  timers[IDX_BCAST] += elapsed;
+
+  return result;
+}
+
+
+
 /* FYI, MPI_File is a pointer to a "struct ADIOI_FileD", defined in mpich-3.2.1/src/mpi/romio/adio/include/adio.h */
 #ifdef __WINDOWS__
 #define FDTYPE HANDLE
@@ -937,60 +1140,84 @@ int MPI_File_write_at_all(MPI_File fh, MPI_Offset offset, const void *buf, int c
   */
 
   int result;
-  double start_time = getTime();
+  double start_time;
 
   io_wrappers_reset();
-  is_inside_MPI_File_write_at_all = 1;
+
+  start_time = getTime();
+  is_inside_mpi_file_write = 1;
   MPE_Log_event(log_ids[STATE_COLL_WRITE], 0, NULL);
 
   result = fn(fh, offset, buf, count, datatype, status);
 
   MPE_Log_event(log_ids[STATE_COLL_WRITE+1], 0, NULL);
-  is_inside_MPI_File_write_at_all = 0;
+  is_inside_mpi_file_write = 0;
 
   double elapsed = getTime() - start_time;
+  counters[IDX_COLL_WRITE]++;
+  timers[IDX_COLL_WRITE] += elapsed;
   fprintf(log, "%.6f file_write_at_all %.6fs\n", start_time, elapsed);
 
   if (rank == 0)
     printf("MPI_File_write_at_all report\n");
-  double io_time, comm_time;
-  io_wrappers_report(stdout, &io_time, &comm_time);
+  io_wrappers_report(stdout);
 
+  /*
   if (rank == 0) {
     printf("MPI_File_write_at_all total %.6fs=%.6f node*sec, io %.6fs (%.1f%%), "
            "comm %.6fs (%.1f%%)\n", elapsed, elapsed*np,
            io_time, elapsed == 0 ? 0 : 100.0 * io_time / (elapsed * np),
            comm_time, elapsed == 0 ? 0 : 100.0 * comm_time / (elapsed * np));
   }
+  */
 
   return result;
 }
 
 
+int MPI_File_read_at_all(MPI_File fh, MPI_Offset offset, void * buf, int count,
+                         MPI_Datatype datatype, MPI_Status *status) {
+  static int (*fn)(MPI_File fh, MPI_Offset offset, void * buf, int count,
+                   MPI_Datatype datatype, MPI_Status *status) = 0;
+  lookup((void**)&fn, "MPI_File_read_at_all");
+
+  int result;
+  double start_time;
+
+  io_wrappers_reset();
+
+  start_time = getTime();
+  is_inside_mpi_file_read = 1;
+  MPE_Log_event(log_ids[STATE_COLL_READ], 0, NULL);
+
+  result = fn(fh, offset, buf, count, datatype, status);
+
+  MPE_Log_event(log_ids[STATE_COLL_READ+1], 0, NULL);
+  is_inside_mpi_file_read = 0;
+
+  double elapsed = getTime() - start_time;
+  counters[IDX_COLL_READ]++;
+  timers[IDX_COLL_READ] += elapsed;
+  fprintf(log, "%.6f file_read_at_all %.6fs\n", start_time, elapsed);
+
+  if (rank == 0)
+    printf("MPI_File_read_at_all report\n");
+  io_wrappers_report(stdout);
+
+  /*
+  if (rank == 0) {
+    printf("MPI_File_write_at_all total %.6fs=%.6f node*sec, io %.6fs (%.1f%%), "
+           "comm %.6fs (%.1f%%)\n", elapsed, elapsed*np,
+           io_time, elapsed == 0 ? 0 : 100.0 * io_time / (elapsed * np),
+           comm_time, elapsed == 0 ? 0 : 100.0 * comm_time / (elapsed * np));
+  }
+  */
+
+  return result;
+}  
+
+
 #if 0
-void* ADIOI_Malloc_fn(size_t size, int lineno, const char *filename) {
-  static void* (*fn)(size_t size, int lineno, const char *filename) = 0;
-  lookup((void**)&fn, "ADIOI_Malloc_fn");
-
-  MPE_Log_event(log_ids[EVENT_ADIOI_MALLOC], 0, NULL);
-  
-  return fn(size, lineno, filename);
-}
-
-
-void ADIOI_Free_fn(void *ptr, int lineno, const char *fname) {
-  static void (*fn)(void *ptr, int lineno, const char *fname) = 0;
-  lookup((void**)&fn, "ADIOI_Free_fn");
-
-  if (is_init)
-    MPE_Log_event(log_ids[EVENT_ADIOI_FREE], 0, NULL);
-
-  fn(ptr, lineno, fname);
-}
-#endif
-
-
-
 int ADIOI_Type_create_hindexed_x(int count, const MPI_Count array_of_blocklengths[], const MPI_Aint array_of_displacements[], MPI_Datatype oldtype, MPI_Datatype *newtype) {
   static int (*fn)(int count, const MPI_Count array_of_blocklengths[], const MPI_Aint array_of_displacements[], MPI_Datatype oldtype, MPI_Datatype *newtype) = 0;
   lookup((void**)&fn, "ADIOI_Type_create_hindexed_x");
@@ -1032,6 +1259,48 @@ void ADIO_ReadContig(void* fd, void *buf, int count, MPI_Datatype datatype, int 
 }  
 
 
+void ADIOI_LUSTRE_Fill_send_buffer(void* fd, const void *buf,
+                                   void *flat_buf,
+                                   char **send_buf,
+                                   void *offset_list,
+                                   void *len_list, int *send_size,
+                                   MPI_Request *requests,
+                                   int *sent_to_proc, int nprocs,
+                                   int myrank,
+                                   int contig_access_count,
+                                   int *striping_info,
+                                   int *send_buf_idx,
+                                   int *curr_to_proc,
+                                   int *done_to_proc, int iter,
+                                   MPI_Aint buftype_extent) {
+
+  static void (*fn)(void* fd, const void *buf,
+                   void *flat_buf,
+                   char **send_buf,
+                   void *offset_list,
+                   void *len_list, int *send_size,
+                   MPI_Request *requests,
+                   int *sent_to_proc, int nprocs,
+                   int myrank,
+                   int contig_access_count,
+                   int *striping_info,
+                   int *send_buf_idx,
+                   int *curr_to_proc,
+                   int *done_to_proc, int iter,
+                   MPI_Aint buftype_extent) = 0;
+  lookup((void**)&fn, "ADIOI_LUSTRE_Fill_send_buffer");
+  
+  MPE_Log_event(log_ids[STATE_ADIO_LUSTRE_FILL_SEND_BUF], 0, NULL);
+
+  fn(fd, buf, flat_buf, send_buf, offset_list, len_list,
+     send_size, requests, sent_to_proc, nprocs, myrank,
+     contig_access_count, striping_info, send_buf_idx,
+     curr_to_proc, done_to_proc, iter, buftype_extent);
+
+  MPE_Log_event(log_ids[STATE_ADIO_LUSTRE_FILL_SEND_BUF+1], 0, NULL);
+}
+
+
 int MPI_Type_commit(MPI_Datatype *datatype) {
   static int (*fn)(MPI_Datatype *datatype) = 0;
   lookup((void**)&fn, "MPI_Type_commit");
@@ -1044,3 +1313,4 @@ int MPI_Type_commit(MPI_Datatype *datatype) {
 
   return result;
 }
+#endif
