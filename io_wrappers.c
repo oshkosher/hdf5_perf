@@ -114,11 +114,11 @@ typedef struct {
 } Counter;
 
 
-void io_wrappers_init(int do_text_log);
-void io_wrappers_reset(); /* reset counters */
+static void io_wrappers_init(int do_text_log);
+/* void io_wrappers_reset(); */ /* reset counters */
   /* collective routine; gather & print data */
-void io_wrappers_report(FILE *outf);
-void io_wrappers_end();  /* deallocate */
+/* void io_wrappers_report(FILE *outf); */
+static void io_wrappers_end();  /* deallocate */
 // static void printBacktrace();
 
 // initialize logging and define states
@@ -773,8 +773,11 @@ int MPI_Finalize() {
   is_init = 0;
 
 #ifdef MPE_LOG_OK
-  MPE_Finish_log("io_wrappers");
-  if (rank==0) printf("Wrote io_wrappers.clog2\n");
+  const char *log_prefix = getenv("IO_WRAPPERS_LOG_PREFIX");
+  if (!log_prefix)
+    log_prefix = "io_wrappers";
+  MPE_Finish_log(log_prefix);
+  if (rank==0) printf("Wrote %s.clog2\n", log_prefix);
 #endif
   
   int result = fn();
