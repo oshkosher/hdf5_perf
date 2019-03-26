@@ -76,7 +76,9 @@ enum {
   IDX_BCAST,
 
   IDX_COLL_WRITE,
+  IDX_INDEP_WRITE,
   IDX_COLL_READ,
+  IDX_INDEP_READ,
 
   IDX_END
 };
@@ -98,7 +100,9 @@ const char *counter_names[] = {
   "barrier",
   "broadcast",
   "collective write",
-  "collective read"
+  "independent write",
+  "collective read",
+  "independent read"
 };
 
 #define N_COUNTERS IDX_END
@@ -141,6 +145,8 @@ enum LogEventIds {
   STATE_READ = 20,
   STATE_BARRIER = 22,
   STATE_BCAST = 24,
+  STATE_INDEP_WRITE = 26,
+  STATE_INDEP_READ = 28,
   
   LOG_EVENT_ID_END
 };
@@ -350,18 +356,32 @@ void io_wrappers_report(FILE *outf) {
     int idx = IDX_COLL_WRITE;
     int c = counters[idx];
     if (c) {
-      fprintf(outf, "MPI_File_write %d call%s, %.6fs, %ld bytes (raw write() %ld bytes)\n",
-              c, c==1 ? "" : "s",
-              timers[idx], (long)all_bytes[idx],
+      fprintf(outf, "MPI_File_write %d calls, %.6fs, %ld bytes (raw write() %ld bytes)\n",
+              c, timers[idx], (long)all_bytes[idx],
+              (long)all_bytes[IDX_WRITE]);
+    }
+
+    idx = IDX_INDEP_WRITE;
+    c = counters[idx];
+    if (c) {
+      fprintf(outf, "MPI_File_write %d calls, %.6fs, %ld bytes (raw write() %ld bytes)\n",
+              c, timers[idx], (long)all_bytes[idx],
               (long)all_bytes[IDX_WRITE]);
     }
 
     idx = IDX_COLL_READ;
     c = counters[idx];
     if (c) {
-      fprintf(outf, "MPI_File_read %d call%s, %.6fs, %ld bytes (raw read() %ld bytes)\n",
-              c, c==1 ? "" : "s",
-              timers[idx], (long)all_bytes[idx],
+      fprintf(outf, "MPI_File_read %d calls, %.6fs, %ld bytes (raw read() %ld bytes)\n",
+              c, timers[idx], (long)all_bytes[idx],
+              (long)all_bytes[IDX_READ]);
+    }
+
+    idx = IDX_INDEP_READ;
+    c = counters[idx];
+    if (c) {
+      fprintf(outf, "MPI_File_read %d calls, %.6fs, %ld bytes (raw read() %ld bytes)\n",
+              c, timers[idx], (long)all_bytes[idx],
               (long)all_bytes[IDX_READ]);
     }
   }
@@ -385,8 +405,9 @@ void io_wrappers_report(FILE *outf) {
     MPI_Reduce(timer_array, all_timers, N_COUNTERS, MPI_DOUBLE, MPI_SUM, 0,
                MPI_COMM_WORLD);
 
-    double coll_io_time = all_timers[IDX_COLL_WRITE]
-      + all_timers[IDX_COLL_READ];
+    double coll_io_time =
+      all_timers[IDX_COLL_WRITE] + all_timers[IDX_COLL_READ] +
+      all_timers[IDX_INDEP_WRITE] + all_timers[IDX_INDEP_READ];
     double raw_io_time = all_timers[IDX_WRITE] + all_timers[IDX_READ];
 
     if (rank == 0) {
@@ -443,8 +464,12 @@ static void init_mpe_logging() {
   if (rank == 0) {
     MPE_Describe_state(log_ids[STATE_COLL_WRITE], log_ids[STATE_COLL_WRITE+1],
                        "Collective write", "MidnightBlue");
+    MPE_Describe_state(log_ids[STATE_INDEP_WRITE], log_ids[STATE_INDEP_WRITE+1],
+                       "Independent write", "MidnightBlue");
     MPE_Describe_state(log_ids[STATE_COLL_READ], log_ids[STATE_COLL_READ+1],
                        "Collective read", "DarkGreen");
+    MPE_Describe_state(log_ids[STATE_INDEP_READ], log_ids[STATE_INDEP_READ+1],
+                       "Independent read", "DarkGreen");
     MPE_Describe_state(log_ids[STATE_WRITE], log_ids[STATE_WRITE+1],
                        "Write", "skyblue");
     MPE_Describe_state(log_ids[STATE_READ], log_ids[STATE_READ+1],
@@ -1151,6 +1176,74 @@ int MPI_File_write_at_all(MPI_File fh, MPI_Offset offset, const void *buf, int c
   return result;
 }
 
+  
+int MPI_File_write_at(MPI_File fh, MPI_Offset offset, const void *buf, int count, MPI_Datatype datatype, MPI_Status *status) {
+  static int (*fn)(MPI_File fh, MPI_Offset offset, const void *buf, int count, MPI_Datatype datatype, MPI_Status *status) = 0;
+  lookup((void**)&fn, "MPI_File_write_at");
+
+  /*
+  if (rank == 0) {
+    struct FileStruct *f = (struct FileStruct*) fh;
+    fprintf(stderr, "MPI_File fh cookie=%x fd=%d d_mem=%u d_miniosz=%u blksize=%ld filename=%s\n", f->cookie, f->fd_sys, f->d_mem, f->d_miniosz, f->blksize, f->filename);
+  }
+  */
+
+  int result;
+  double start_time;
+  uint64_t raw_io_bytes = bytes[IDX_WRITE];
+
+  io_wrappers_reset();
+
+  start_time = getTime();
+  is_inside_mpi_file_write = 1;
+  MPE_Log_event(log_ids[STATE_INDEP_WRITE], 0, NULL);
+
+  result = fn(fh, offset, buf, count, datatype, status);
+
+  MPE_Log_event(log_ids[STATE_INDEP_WRITE+1], 0, NULL);
+  is_inside_mpi_file_write = 0;
+
+  double elapsed = getTime() - start_time;
+  counters[IDX_INDEP_WRITE]++;
+  timers[IDX_INDEP_WRITE] += elapsed;
+  raw_io_bytes = bytes[IDX_WRITE] - raw_io_bytes;
+
+  /* compute the # of bytes written */
+  int success_count;
+  uint64_t mpi_io_bytes = 0;
+  if (status != MPI_STATUS_IGNORE) {
+    MPI_Get_count(status, datatype, &success_count);
+  } else if (result == MPI_SUCCESS) {
+    success_count = count;
+  } else {
+    success_count = 0;
+  }
+    
+  if (success_count > 0) {
+    MPI_Count dt_size;
+    MPI_Type_size_x(datatype, &dt_size);
+    mpi_io_bytes = success_count * dt_size;
+    bytes[IDX_INDEP_WRITE] += mpi_io_bytes;
+  }
+
+  if (log) fprintf(log, "%.6f file_write_at %ld bytes %.6fs write(%d calls, %ld bytes, %.6fs)\n", start_time, (long)mpi_io_bytes, elapsed, counters[IDX_WRITE], (long)raw_io_bytes, timers[IDX_WRITE]);
+
+  if (rank == 0)
+    printf("MPI_File_write_at report\n");
+  io_wrappers_report(stdout);
+
+  /*
+  if (rank == 0) {
+    printf("MPI_File_write_at_all total %.6fs=%.6f node*sec, io %.6fs (%.1f%%), "
+           "comm %.6fs (%.1f%%)\n", elapsed, elapsed*np,
+           io_time, elapsed == 0 ? 0 : 100.0 * io_time / (elapsed * np),
+           comm_time, elapsed == 0 ? 0 : 100.0 * comm_time / (elapsed * np));
+  }
+  */
+
+  return result;
+}
+
 
 int MPI_File_read_at_all(MPI_File fh, MPI_Offset offset, void * buf, int count,
                          MPI_Datatype datatype, MPI_Status *status) {
@@ -1200,6 +1293,60 @@ int MPI_File_read_at_all(MPI_File fh, MPI_Offset offset, void * buf, int count,
 
   if (rank == 0)
     printf("MPI_File_read_at_all report\n");
+  io_wrappers_report(stdout);
+
+  return result;
+}  
+
+
+int MPI_File_read_at(MPI_File fh, MPI_Offset offset, void * buf, int count,
+                         MPI_Datatype datatype, MPI_Status *status) {
+  static int (*fn)(MPI_File fh, MPI_Offset offset, void * buf, int count,
+                   MPI_Datatype datatype, MPI_Status *status) = 0;
+  lookup((void**)&fn, "MPI_File_read_at");
+
+  int result;
+  double start_time;
+  uint64_t raw_io_bytes = bytes[IDX_READ];
+
+  io_wrappers_reset();
+
+  start_time = getTime();
+  is_inside_mpi_file_read = 1;
+  MPE_Log_event(log_ids[STATE_INDEP_READ], 0, NULL);
+
+  result = fn(fh, offset, buf, count, datatype, status);
+
+  MPE_Log_event(log_ids[STATE_INDEP_READ+1], 0, NULL);
+  is_inside_mpi_file_read = 0;
+
+  double elapsed = getTime() - start_time;
+  counters[IDX_INDEP_READ]++;
+  timers[IDX_INDEP_READ] += elapsed;
+  raw_io_bytes = bytes[IDX_READ] - raw_io_bytes;
+
+  /* compute the # of bytes read */
+  int success_count;
+  uint64_t mpi_io_bytes = 0;
+  if (status != MPI_STATUS_IGNORE) {
+    MPI_Get_count(status, datatype, &success_count);
+  } else if (result == MPI_SUCCESS) {
+    success_count = count;
+  } else {
+    success_count = 0;
+  }
+    
+  if (success_count > 0) {
+    MPI_Count dt_size;
+    MPI_Type_size_x(datatype, &dt_size);
+    mpi_io_bytes = success_count * dt_size;
+    bytes[IDX_INDEP_READ] += mpi_io_bytes;
+  }
+
+  if (log) fprintf(log, "%.6f file_read_at %ld bytes %.6fs read(%d calls, %ld bytes, %.6fs)\n", start_time, (long)mpi_io_bytes, elapsed, counters[IDX_READ], (long)raw_io_bytes, timers[IDX_READ]);
+
+  if (rank == 0)
+    printf("MPI_File_read_at report\n");
   io_wrappers_report(stdout);
 
   return result;
