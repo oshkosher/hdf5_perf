@@ -976,6 +976,7 @@ int PMPI_Isend(const void *buf, int count, MPI_Datatype datatype, int dest, int 
   int result;
   double start_time = getTime();
   MPE_Log_event(log_ids[STATE_ISEND], 0, NULL);
+  MPE_Log_send(dest, tag, count);
 
   result = fn(buf, count, datatype, dest, tag, comm, request);
 
